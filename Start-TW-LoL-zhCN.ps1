@@ -30,13 +30,13 @@ function Get-RiotConnection {
     }
 }
 
-function Invoke-Riot([hashtable]$connection, [string]$method, [string]$path, [string]$body = $null) {
+function Invoke-Riot([hashtable]$connection, [string]$method, [string]$path, [string]$body = $null, [int]$timeoutSec = 15) {
     $args = @{
         Uri = $connection.Base + $path
         Method = $method
         Headers = @{ Authorization = $connection.Authorization }
         SkipCertificateCheck = $true
-        TimeoutSec = 15
+        TimeoutSec = $timeoutSec
         ErrorAction = 'Stop'
     }
     if ($PSBoundParameters.ContainsKey('body')) {
@@ -86,11 +86,24 @@ try {
         Start-Process -FilePath $riotExe -ArgumentList @('--launch-product=league_of_legends', '--launch-patchline=live') -WindowStyle Hidden
     }
 
+    # Set the product locale as soon as Riot's local API opens. Waiting for
+    # launcher eligibility lets the patcher inspect zh_CN assets as extras.
     $deadline = (Get-Date).AddSeconds(120)
-    $ready = $false
+    $earlyLocaleSet = $false
     do {
         try {
             $connection = Get-RiotConnection
+            $null = Invoke-Riot $connection 'PUT' $localePath '"zh_CN"' 3
+            $earlyLocaleSet = $true
+            break
+        } catch { Start-Sleep -Milliseconds 250 }
+    } while ((Get-Date) -lt $deadline)
+    if (-not $earlyLocaleSet) { throw 'Riot 客户端未能在两分钟内接受语言设置' }
+    Write-Status '已在 Riot 启动早期设置 zh_CN'
+
+    $ready = $false
+    do {
+        try {
             $null = Invoke-Riot $connection 'GET' '/product-launcher/v1/products/league_of_legends/patchlines/live/eligibility'
             $ready = $true
             break
@@ -129,23 +142,35 @@ try {
     Write-Status "简中资源就绪：$($files.Count) 个游戏文件，本次复制 $copied 个"
 
     $launched = $false
-    for ($attempt = 1; $attempt -le 6; $attempt++) {
+    for ($attempt = 1; $attempt -le 12; $attempt++) {
         try {
             $null = Invoke-Riot $connection 'PUT' $localePath '"zh_CN"'
-            $null = Invoke-Riot $connection 'POST' '/product-launcher/v1/products/league_of_legends/patchlines/live' '{}'
+            $null = Invoke-Riot $connection 'POST' '/product-launcher/v1/products/league_of_legends/patchlines/live' '{}' 30
             $launched = $true
             break
         } catch {
+            if (Get-Process -Name 'LeagueClient' -ErrorAction SilentlyContinue) {
+                $launched = $true
+                break
+            }
             $status = 0
             if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
-            if ($status -ne 424 -or $attempt -eq 6) { throw }
-            Write-Status "Riot 正在完成修复，稍后重试（$attempt/6）"
+            $timedOut = $_.Exception.Message -match 'Timeout|timed out|超时'
+            if (($status -ne 423 -and $status -ne 424 -and -not $timedOut) -or $attempt -eq 12) { throw }
+            Write-Status "Riot 正在完成资源检查，稍后重试（$attempt/12）"
             Start-Sleep -Seconds 10
             foreach ($file in $files) {
                 $relative = $file.FullName.Substring($cnGame.Length + 1)
                 $destination = Join-Path $twGame $relative
                 if (-not (Test-Path -LiteralPath $destination)) {
                     Copy-Item -LiteralPath $file.FullName -Destination $destination -ErrorAction Stop
+                }
+            }
+            foreach ($relative in $pluginFiles) {
+                $source = Join-Path $cnPlugins $relative
+                $destination = Join-Path $twPlugins $relative
+                if (-not (Test-Path -LiteralPath $destination)) {
+                    Copy-Item -LiteralPath $source -Destination $destination -ErrorAction Stop
                 }
             }
         }
