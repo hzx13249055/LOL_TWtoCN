@@ -4,3 +4,6 @@ config.local.json
 *.wad.client
 *.lnk
 .DS_Store
+cache/
+*.cache.json
+*.partial

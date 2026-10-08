@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'Tests require PowerShell 7' }
 $pwsh = (Get-Process -Id $PID).Path
 $launcher = Join-Path (Split-Path $PSScriptRoot -Parent) 'Start-TW-LoL-zhCN.ps1'
+. (Join-Path (Split-Path $PSScriptRoot -Parent) 'Resource-Backup.ps1')
 $source = Get-Content -LiteralPath $launcher -Raw
 $tokens = $null
 $errors = $null
@@ -14,6 +15,7 @@ $mocks = @'
 $env:LOCALAPPDATA = Join-Path $PSScriptRoot 'local'
 $script:patchPoll = 0
 $script:testLaunched = $false
+$script:testValidated = $false
 function Get-Item {
     param([string]$LiteralPath)
     if ($env:LOL_TEST_CASE -eq 'native' -and $LiteralPath -like '*\cn\*') { throw 'Native mode read obsolete CN resources' }
@@ -33,6 +35,12 @@ function Start-Process { throw 'Test attempted to start a real program' }
 function Start-Sleep { }
 function Invoke-WebRequest {
     param($Uri, $Method, $Headers, $SkipCertificateCheck, $NoProxy, $TimeoutSec, $ContentType, $Body)
+    if ($Method -eq 'POST' -and $Uri -like '*patch-states/refresh*') {
+        $target = Join-Path $PSScriptRoot 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client'
+        if ([IO.File]::ReadAllText($target) -ne 'NEW!') { throw 'Validation requested before missing resources were restored' }
+        $script:testValidated = $true
+        return [pscustomobject]@{ Content = '{}'; StatusCode = 200 }
+    }
     if ($Uri -like '*product-locales*') { return [pscustomobject]@{ Content = '"zh_CN"'; StatusCode = 200 } }
     if ($Uri -like '*eligibility') { return [pscustomobject]@{ Content = 'true'; StatusCode = 200 } }
     if ($Uri -like '*patch-states*') {
@@ -49,6 +57,7 @@ function Invoke-WebRequest {
         return [pscustomobject]@{ Content = '[]'; StatusCode = 201 }
     }
     if ($Method -eq 'POST') {
+        if ($env:LOL_TEST_CASE -eq 'restore' -and -not $script:testValidated) { throw 'Launch bypassed validation after restoration' }
         $target = Join-Path $PSScriptRoot 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client'
         $bytes = [IO.File]::ReadAllText($target)
         if ($env:LOL_TEST_CASE -eq 'updating' -and $script:patchPoll -eq 1) {
@@ -67,7 +76,7 @@ function Invoke-WebRequest {
 }
 '@
 try {
-    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native')) {
+    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore')) {
         $root = Join-Path $testRoot $case
         foreach ($path in @('cn\Game\DATA\FINAL','tw\Game\DATA\FINAL',
             'cn\LeagueClient\Plugins\rcp-be-lol-game-data','cn\LeagueClient\Plugins\rcp-fe-lol-typekit',
@@ -91,21 +100,27 @@ try {
             [IO.File]::WriteAllText((Join-Path $root "cn\LeagueClient\Plugins\$plugin\zh_CN-assets.wad"), 'NEW!')
             [IO.File]::WriteAllText((Join-Path $root "tw\Plugins\$plugin\zh_CN-assets.wad"), 'OLD!')
         }
-        if ($case -eq 'native') {
+        if ($case -in @('native','restore')) {
             Get-ChildItem -LiteralPath (Join-Path $root 'cn\Game\DATA\FINAL') -File |
                 Copy-Item -Destination (Join-Path $root 'tw\Game\DATA\FINAL') -Force
             foreach ($plugin in @('rcp-be-lol-game-data', 'rcp-fe-lol-typekit')) {
                 [IO.File]::WriteAllText((Join-Path $root "tw\Plugins\$plugin\zh_CN-assets.wad"), 'NEW!')
             }
         }
+        if ($case -eq 'restore') {
+            $null = Save-ResourceBackup (Join-Path $root 'tw') (Join-Path $root 'cache')
+            Remove-Item -LiteralPath (Join-Path $root 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client')
+            Remove-Item -LiteralPath (Join-Path $root 'tw\Game\DATA\FINAL\test1.zh_CN.wad.client')
+        }
         @{ cnRoot=(Join-Path $root 'cn'); twRoot=(Join-Path $root 'tw'); riotClientExe=(Join-Path $root 'riot.exe') } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'config.local.json') -Encoding utf8
         $fixture = $source.Insert($ast.ParamBlock.Extent.EndOffset, "`n$mocks`n")
         $fixture = $fixture.Replace("'Local\LOL_TWtoCN_Launcher'", "'Local\LOL_TWtoCN_Test_$([guid]::NewGuid())'")
         $fixturePath = Join-Path $root 'launcher.ps1'
+        Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Resource-Backup.ps1') -Destination (Join-Path $root 'Resource-Backup.ps1')
         Set-Content -LiteralPath $fixturePath -Value $fixture -Encoding utf8
         $env:LOL_TEST_CASE = $case
-        $mode = if ($case -eq 'native') { 'Riot' } else { 'Local' }
+        $mode = if ($case -in @('native','restore')) { 'Riot' } else { 'Local' }
         $output = & $pwsh -NoProfile -File $fixturePath -ResourceSource $mode 2>&1
         $exitCode = $LASTEXITCODE
         if ($case -eq 'mismatch') {

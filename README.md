@@ -36,6 +36,28 @@ pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -CheckOnly
 - 更新默认最多等待 120 分钟；网络较慢时可使用 `-WaitMinutes 1440` 延长。重复点击只允许一个启动器运行。桌面入口失败时显示原因；Riot 接受请求后还会确认 League 客户端已打开。
 - 日志保存在 `%LOCALAPPDATA%\LOL_TWtoCN\launcher.log`，不进入 Git。
 
+## 自动本地备份
+
+官方模式在 Riot 完成更新后，自动备份简中游戏文件及两个客户端资源。之后启动时，只恢复**同一完整资源版本**中缺失的文件，再由 Riot 检查；已有文件不会被覆盖，更新或对局期间不会往游戏目录恢复文件。
+
+默认备份目录为项目下的 `cache`，首次约需 4 GB 空间。资源按 SHA-256 内容摘要保存，相同内容在不同版本间只存一份；旧版本清单保留，但不会跨版本恢复。损坏的备份文件不会恢复，交给 Riot 下载。备份失败会记录原因，不阻止正常游戏启动。
+
+可在安装时指定有足够空间的本地目录，安装器会保留此前设置：
+
+```powershell
+pwsh -NoProfile -File .\Install.ps1 `
+  -TwRoot 'D:\Riot Games\League of Legends\League of Legends' `
+  -CacheRoot 'E:\LOL_TWtoCN_Cache'
+```
+
+资源已经下载完成时，也可仅建立备份。此操作读取资源，不关闭或启动游戏；要求 Riot 正在运行、语言为 `zh_CN` 且更新状态完整：
+
+```powershell
+pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -BackupOnly
+```
+
+备份资源、版本清单、临时文件及本机路径配置均被 Git 忽略；仓库仅上传脚本、说明和测试。备份可减少缺失文件导致的重复下载，真正的版本变化仍须由 Riot 更新。不要把备份目录放进游戏安装目录。
+
 ## 可选：使用已安装的国服资源
 
 保留旧的本地复制方式，需要安装配置中设置 `cnRoot`，且两端程序及资源必须为相同补丁：
@@ -55,6 +77,7 @@ pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -ResourceSource Local -ShowErrors
 
 ```powershell
 pwsh -NoProfile -File .\tests\Launcher.Tests.ps1
+pwsh -NoProfile -File .\tests\Resource-Backup.Tests.ps1
 ```
 
 隔离测试覆盖版本不匹配保护、同大小资源更新、等待补丁完成后再写入，以及官方模式不读取较旧国服资源。测试不访问 Riot、不修改已安装游戏文件。

@@ -1,5 +1,6 @@
 param(
     [string]$CnRoot,
+    [string]$CacheRoot,
     [Parameter(Mandatory = $true)][string]$TwRoot,
     [string]$RiotClientExe = 'C:\Riot Games\Riot Client\RiotClientServices.exe',
     [string]$ShortcutPath = (Join-Path ([Environment]::GetFolderPath('Desktop')) '台服 LOL 简体中文.lnk')
@@ -25,10 +26,13 @@ foreach ($path in @(
 }
 
 $configPath = Join-Path $PSScriptRoot 'config.local.json'
+$previousConfig = if (Test-Path -LiteralPath $configPath) { Get-Content -LiteralPath $configPath -Raw -Encoding utf8 | ConvertFrom-Json } else { $null }
+$cache = if ($CacheRoot) { [IO.Path]::GetFullPath($CacheRoot, $PSScriptRoot) } elseif ($previousConfig.cacheRoot) { $previousConfig.cacheRoot } else { Join-Path $PSScriptRoot 'cache' }
 $config = [ordered]@{
     cnRoot = $cn
     twRoot = $tw
     riotClientExe = $riot
+    cacheRoot = $cache
 }
 $config | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $configPath -Encoding utf8
 

@@ -1,6 +1,7 @@
 param(
     [switch]$CheckOnly,
     [switch]$ShowErrors,
+    [switch]$BackupOnly,
     [ValidateSet('Riot', 'Local')][string]$ResourceSource = 'Riot',
     [ValidateRange(1, 1440)][int]$WaitMinutes = 120
 )
@@ -12,6 +13,20 @@ $logDir = Join-Path $env:LOCALAPPDATA 'LOL_TWtoCN'
 $logPath = Join-Path $logDir 'launcher.log'
 $mutex = $null
 $ownsMutex = $false
+. (Join-Path $PSScriptRoot 'Resource-Backup.ps1')
+
+function Save-VerifiedBackup {
+    Write-Status "正在核对并保存本地简中备份：$cacheRoot"
+    $saved = Save-ResourceBackup $twRoot $cacheRoot
+    Write-Status "本地备份就绪：$($saved.FileCount) 个资源，新增 $($saved.AddedFiles) 个文件（$([math]::Round($saved.AddedBytes / 1MB)) MB）"
+}
+
+function Restore-MissingBackup {
+    $restored = Restore-ResourceBackup $twRoot $cacheRoot
+    if ($restored.Restored -gt 0) { Write-Status "已从同版本本地备份恢复 $($restored.Restored) 个缺失资源，继续由 Riot 校验" | Out-Host }
+    if ($restored.Rejected -gt 0) { Write-Status "本地备份中 $($restored.Rejected) 个资源未通过校验，交给 Riot 下载" | Out-Host }
+    return $restored
+}
 
 function Write-Status([string]$message) {
     if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
@@ -106,6 +121,7 @@ function Sync-Resources {
 try {
     if ($PSVersionTable.PSVersion.Major -lt 7) { throw '需要 PowerShell 7 (pwsh)' }
     $config = Get-Content -LiteralPath $configPath -Raw -Encoding utf8 | ConvertFrom-Json
+    $cacheRoot = if ($config.cacheRoot) { [IO.Path]::GetFullPath($config.cacheRoot, $PSScriptRoot) } else { Join-Path $PSScriptRoot 'cache' }
     $twRoot = (Resolve-Path -LiteralPath $config.twRoot -ErrorAction Stop).Path.TrimEnd('\')
     $riotExe = (Resolve-Path -LiteralPath $config.riotClientExe -ErrorAction Stop).Path
     $twGame = Join-Path $twRoot 'Game\DATA\FINAL'
@@ -136,14 +152,27 @@ try {
         exit 0
     }
 
-    if (Get-Process -Name 'League of Legends' -ErrorAction SilentlyContinue) { throw '对局正在运行，请勿切换语言' }
-    if (Get-Process -Name 'LeagueClient' -ErrorAction SilentlyContinue) { throw '请先关闭已打开的 League 客户端' }
-
     $mutex = [Threading.Mutex]::new($false, 'Local\LOL_TWtoCN_Launcher')
     try { $ownsMutex = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
     if (-not $ownsMutex) { throw '另一个简中启动器仍在运行，请等待它完成' }
 
+    if ($BackupOnly) {
+        if ($ResourceSource -ne 'Riot') { throw '本地备份仅保存 Riot 官方模式已验证的资源' }
+        $connection = Get-RiotConnection
+        $state = (Invoke-Riot $connection 'GET' '/patch-proxy/v2/patch-states/products/league_of_legends/patchlines/live').Content | ConvertFrom-Json
+        $current = (Invoke-Riot $connection 'GET' $localePath).Content | ConvertFrom-Json
+        if ($state.state -ne 'UpToDate' -or -not $state.launchable -or $current -ne 'zh_CN') { throw '请在 Riot 已完成 zh_CN 更新后再建立备份' }
+        Save-VerifiedBackup
+        exit 0
+    }
+
+    if (Get-Process -Name 'League of Legends' -ErrorAction SilentlyContinue) { throw '对局正在运行，请勿切换语言' }
+    if (Get-Process -Name 'LeagueClient' -ErrorAction SilentlyContinue) { throw '请先关闭已打开的 League 客户端' }
+
     if (-not (Get-Process -Name 'RiotClientServices' -ErrorAction SilentlyContinue)) {
+        if ($ResourceSource -eq 'Riot') {
+            try { $null = Restore-MissingBackup } catch { Write-Status ('本地备份未恢复，继续交给 Riot：' + $_.Exception.Message) }
+        }
         Write-Status '正在启动 Riot 客户端'
         Start-Process -FilePath $riotExe -ArgumentList @('--launch-product=league_of_legends', '--launch-patchline=live') -WindowStyle Hidden
     }
@@ -198,6 +227,15 @@ try {
             if ($patch.launchable -eq $true -and $patch.state -eq 'UpToDate') {
                 if (-not $resourcesReady) {
                     if ($ResourceSource -eq 'Local') { Sync-Resources } else {
+                        # UpToDate is idle. Active patching never receives writes.
+                        $restored = $null
+                        try { $restored = Restore-MissingBackup } catch { Write-Status ('本地备份不可用，继续检查官方资源：' + $_.Exception.Message) }
+                        if ($restored.Restored -gt 0 -or $restored.Rejected -gt 0) {
+                            $null = Invoke-Riot $connection 'POST' '/patch-proxy/v2/patch-states/refresh/products/league_of_legends/patchlines/live' '{"quickValidation":false,"force":true,"forLaunch":true}'
+                            Write-Status '已要求 Riot 完整校验恢复后的资源，等待校验完成再启动'
+                            Start-Sleep -Seconds 2
+                            continue
+                        }
                         $installed = @(Get-ChildItem -LiteralPath $twGame -Recurse -File -Filter '*.zh_CN.wad.client')
                         if ($installed.Count -lt 100 -or -not ($installed | Where-Object Name -eq 'Global.zh_CN.wad.client')) {
                             throw "Riot 更新已结束，但 zh_CN 游戏资源不完整：$($installed.Count) 个文件"
@@ -206,6 +244,7 @@ try {
                             if (-not (Test-Path -LiteralPath (Join-Path $twPlugins $relative))) { throw "Riot zh_CN 客户端资源缺失：$relative" }
                         }
                         Write-Status "Riot 官方简中资源就绪：$($installed.Count) 个游戏文件，无需复制国服资源"
+                        try { Save-VerifiedBackup } catch { Write-Status ('本地备份未更新，继续启动：' + $_.Exception.Message) }
                     }
                     $resourcesReady = $true
                 }
