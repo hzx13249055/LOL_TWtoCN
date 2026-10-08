@@ -110,14 +110,18 @@ function Read-ResourceBackup([string]$GameRoot, [string]$CacheRoot, [ValidateSet
     return $manifest
 }
 
-function Restore-ResourceBackup([string]$GameRoot, [string]$CacheRoot, [ValidateSet('zh_CN','zh_TW')][string]$Locale = 'zh_CN') {
+function Restore-ResourceBackup([string]$GameRoot, [string]$CacheRoot, [ValidateSet('zh_CN','zh_TW')][string]$Locale = 'zh_CN', [switch]$RepairExisting) {
     $manifest = Read-ResourceBackup $GameRoot $CacheRoot $Locale
     if ($null -eq $manifest) { return [pscustomobject]@{ Restored=0; Rejected=0; Found=$false } }
     $restored = 0
     $rejected = 0
     foreach ($entry in $manifest.entries) {
         $destination = Get-BackupEntryPath $GameRoot $entry.path $Locale
-        if (Test-Path -LiteralPath $destination) { continue }
+        if (Test-Path -LiteralPath $destination) {
+            if (-not $RepairExisting) { continue }
+            if ((Get-Item -LiteralPath $destination).Length -eq $entry.length -and
+                (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -eq $entry.sha256) { continue }
+        }
         $object = Join-Path (Join-Path $CacheRoot 'objects') ($entry.sha256.ToUpperInvariant() + '.wad')
         if (-not (Test-Path -LiteralPath $object -PathType Leaf) -or
             (Get-Item -LiteralPath $object).Length -ne $entry.length -or
@@ -126,8 +130,9 @@ function Restore-ResourceBackup([string]$GameRoot, [string]$CacheRoot, [Validate
         $temporary = $destination + '.' + [guid]::NewGuid() + '.partial'
         try {
             [IO.File]::Copy($object, $temporary, $false)
-            # Never overwrite a file created by Riot while restoration ran.
-            [IO.File]::Move($temporary, $destination, $false)
+            # RepairExisting is only used while the caller holds Riot's exclusive
+            # session patch lock and has confirmed the old patch job is idle.
+            [IO.File]::Move($temporary, $destination, [bool]$RepairExisting)
         } finally {
             if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
         }

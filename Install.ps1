@@ -22,7 +22,6 @@ foreach ($path in @(
     (Join-Path $tw 'Game\DATA\FINAL'),
     (Join-Path $tw 'Plugins'),
     (Join-Path $PSScriptRoot 'Resource-Backup.ps1'),
-    (Join-Path $PSScriptRoot 'Product-Locale.ps1'),
     (Join-Path $PSScriptRoot 'Vanguard-Status.ps1'),
     $launcher
 )) {

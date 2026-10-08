@@ -33,6 +33,11 @@ try {
     [IO.File]::WriteAllText($voiceFile, 'voice')
     Write-Output 'PASS missing-only restoration'
 
+    [IO.File]::WriteAllText($voiceFile, 'damaged same-version asset')
+    $fixed = Restore-ResourceBackup $gameRoot $cacheRoot -RepairExisting
+    Assert ($fixed.Restored -eq 1 -and [IO.File]::ReadAllText($voiceFile) -eq 'voice') 'Protected repair did not restore a damaged existing file'
+    Write-Output 'PASS protected repair of existing resources'
+
     Remove-Item -LiteralPath $globalFile
     [IO.File]::WriteAllText($metadata, '{"version":"16.20.2+content.release"}')
     $wrongVersion = Restore-ResourceBackup $gameRoot $cacheRoot
@@ -46,6 +51,10 @@ try {
     [IO.File]::WriteAllText($objectPath, 'corrupt!')
     $bad = Restore-ResourceBackup $gameRoot $cacheRoot
     Assert ($bad.Rejected -eq 1 -and -not (Test-Path -LiteralPath $globalFile)) 'Corrupted object was restored'
+    [IO.File]::WriteAllText($globalFile, 'preserve damaged target')
+    $badRepair = Restore-ResourceBackup $gameRoot $cacheRoot -RepairExisting
+    Assert ($badRepair.Rejected -eq 1 -and [IO.File]::ReadAllText($globalFile) -eq 'preserve damaged target') 'Corrupt cache replaced an existing file'
+    Remove-Item -LiteralPath $globalFile
     Write-Output 'PASS version and checksum guards'
 
     $index.entries += [pscustomobject]@{ path='Game/DATA/FINAL/../../outside.zh_CN.wad.client'; length=8; sha256=$globalEntry.sha256 }

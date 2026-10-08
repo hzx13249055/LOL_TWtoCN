@@ -16,7 +16,8 @@ $env:LOCALAPPDATA = Join-Path $PSScriptRoot 'local'
 $script:patchPoll = 0
 $script:testLaunched = $false
 $script:testValidated = $false
-$script:riotRunning = $true
+$script:patchHeld = $false
+$script:riotRunning = $env:LOL_TEST_CASE -ne 'cold'
 $script:riotFull = $env:LOL_TEST_CASE -notin @('background','background-transition')
 if ($env:LOL_TEST_CASE -eq 'background-transition') {
     Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Riot Games\Riot Client\Config\lockfile')
@@ -37,8 +38,6 @@ function Get-Process {
     if ($Name -contains 'LeagueClient' -and $script:testLaunched) { return [pscustomobject]@{ Id = 2 } }
 }
 function Start-Process {
-    $metadata = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'product_settings.yaml'))
-    if ($metadata -notmatch ('default_locale: "' + $Locale + '"')) { throw 'Riot opened before default locale was staged' }
     $script:riotRunning = $true; $script:riotFull = $true
     if ($env:LOL_TEST_CASE -eq 'background-transition') {
         [IO.File]::WriteAllText((Join-Path $env:LOCALAPPDATA 'Riot Games\Riot Client\Config\lockfile'), 'mock:1:1234:test:https')
@@ -51,13 +50,35 @@ function Invoke-WebRequest {
         $script:riotRunning = $false
         return [pscustomobject]@{ Content = '{}'; StatusCode = 204 }
     }
-    if ($Method -eq 'POST' -and $Uri -like '*patch-states/refresh*') {
-        $target = Join-Path $PSScriptRoot 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client'
-        if ([IO.File]::ReadAllText($target) -ne 'NEW!') { throw 'Validation requested before missing resources were restored' }
-        $script:testValidated = $true
-        return [pscustomobject]@{ Content = '{}'; StatusCode = 200 }
+    if ($Uri -like '*session-patch-lock*') {
+        if (-not $script:riotFull -or -not $script:riotRunning) {
+            $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::NotFound)
+            throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('Mock background mode', $response)
+        }
+        if ($Method -eq 'PUT') {
+            if ($script:patchHeld) { throw 'Reacquired a lock already owned by the launcher' }
+            if ($Body -ne 'true') { throw 'Exclusive patch lock missing' }
+            $script:patchHeld = $true
+        } else {
+            if ($env:LOL_TEST_CASE -eq 'autounlock' -and -not $script:patchHeld) {
+                $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::NotFound)
+                throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('Mock lock already released', $response)
+            }
+            $script:patchHeld = $false
+        }
+        return [pscustomobject]@{ Content='{}'; StatusCode=201 }
+    }
+    if ($Uri -like '*patch-jobs*' -and $Method -eq 'DELETE') {
+        if (-not $script:patchHeld) { throw 'Cancellation without exclusive lock' }
+        if ($env:LOL_TEST_CASE -eq 'initializing' -and -not $script:initializingRetried) {
+            $script:initializingRetried = $true
+            $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::NotFound)
+            throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('Mock product registry still initializing', $response)
+        }
+        return [pscustomobject]@{ Content='{}'; StatusCode=204 }
     }
     if ($Uri -like '*product-locales*') {
+        if ($Method -eq 'PUT' -and -not $script:patchHeld) { throw 'Locale modified before patch control' }
         if (-not $script:riotFull) {
             $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::NotFound)
             throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('Mock background mode', $response)
@@ -66,23 +87,33 @@ function Invoke-WebRequest {
     }
     if ($Uri -like '*eligibility') { return [pscustomobject]@{ Content = 'true'; StatusCode = 200 } }
     if ($Uri -like '*patch-states*') {
+        if ($script:patchHeld) {
+            $idleState = if ($env:LOL_TEST_CASE -eq 'cold') { 'OutOfDate' } else { 'Paused' }
+            return [pscustomobject]@{ Content=(@{state=$idleState;launchable=$false} | ConvertTo-Json); StatusCode=200 }
+        }
         $script:patchPoll++
         if ($env:LOL_TEST_CASE -eq 'restart' -and $script:patchPoll -eq 2) {
             $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::NotFound)
             throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('Mock Riot restarting', $response)
         }
-        $state = if ($env:LOL_TEST_CASE -in @('updating','partial') -and $script:patchPoll -eq 1) { 'updating' } else { 'up_to_date' }
+        $state = if ($env:LOL_TEST_CASE -in @('updating','partial','restart') -and $script:patchPoll -eq 1) { 'updating' } else { 'up_to_date' }
         $ready = $state -eq 'up_to_date'
         $state = if ($ready) { 'UpToDate' } else { 'Updating' }
         if ($env:LOL_TEST_CASE -eq 'partial' -and $script:patchPoll -eq 1) { $state = 'Paused'; $ready = $true }
         return [pscustomobject]@{ Content = (@{ state=$state; launchable=$ready; progress=@{totalBytesDownloaded=1;totalBytesToDownload=4} } | ConvertTo-Json); StatusCode = 200 }
     }
     if ($Uri -like '*priority-patch*') {
-        $target = Join-Path $PSScriptRoot "tw\Game\DATA\FINAL\Global.$Locale.wad.client"
-        if ([IO.File]::ReadAllText($target) -ne 'OLD!') { throw 'Resources were overwritten while patching' }
+        if (-not $script:patchHeld -or ($Body | ConvertFrom-Json).locale -ne $Locale) { throw 'Patch locale was not explicitly bound under exclusive lock' }
+        if ($env:LOL_TEST_CASE -in @('restore','repair')) {
+            if ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client')) -ne 'NEW!') { throw 'Cache not repaired before explicit patch request' }
+        }
+        $script:testValidated = $true
+        if ($env:LOL_TEST_CASE -eq 'autounlock') { $script:patchHeld = $false }
         return [pscustomobject]@{ Content = '[]'; StatusCode = 201 }
     }
     if ($Method -eq 'POST') {
+        if ($script:patchHeld) { throw 'Patch lock leaked into launch' }
+        if ($env:LOL_TEST_CASE -eq 'prepare') { throw 'PrepareOnly attempted game launch' }
         if ($env:LOL_TEST_CASE -eq 'restore' -and -not $script:testValidated) { throw 'Launch bypassed validation after restoration' }
         $target = Join-Path $PSScriptRoot "tw\Game\DATA\FINAL\Global.$Locale.wad.client"
         $bytes = [IO.File]::ReadAllText($target)
@@ -108,7 +139,7 @@ function Invoke-WebRequest {
 }
 '@
 try {
-    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore', 'traditional', 'restart', 'background', 'background-transition', 'vanguard216')) {
+    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore', 'traditional', 'restart', 'background', 'background-transition', 'vanguard216','repair','prepare','cold','initializing','autounlock')) {
         $root = Join-Path $testRoot $case
         foreach ($path in @('cn\Game\DATA\FINAL','tw\Game\DATA\FINAL',
             'cn\LeagueClient\Plugins\rcp-be-lol-game-data','cn\LeagueClient\Plugins\rcp-fe-lol-typekit',
@@ -132,7 +163,7 @@ try {
             [IO.File]::WriteAllText((Join-Path $root "cn\LeagueClient\Plugins\$plugin\zh_CN-assets.wad"), 'NEW!')
             [IO.File]::WriteAllText((Join-Path $root "tw\Plugins\$plugin\zh_CN-assets.wad"), 'OLD!')
         }
-        if ($case -in @('native','restore','traditional','restart','background','background-transition','vanguard216')) {
+        if ($case -in @('native','restore','traditional','restart','background','background-transition','vanguard216','repair','prepare','cold','initializing','autounlock')) {
             Get-ChildItem -LiteralPath (Join-Path $root 'cn\Game\DATA\FINAL') -File |
                 Copy-Item -Destination (Join-Path $root 'tw\Game\DATA\FINAL') -Force
             foreach ($plugin in @('rcp-be-lol-game-data', 'rcp-fe-lol-typekit')) {
@@ -147,9 +178,9 @@ try {
                 [IO.File]::WriteAllText((Join-Path $root "tw\Plugins\$plugin\zh_TW-assets.wad"), 'NEW!')
             }
         }
-        if ($case -eq 'restore') {
+        if ($case -in @('restore','repair')) {
             $null = Save-ResourceBackup (Join-Path $root 'tw') (Join-Path $root 'cache')
-            Remove-Item -LiteralPath (Join-Path $root 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client')
+            if ($case -eq 'repair') { [IO.File]::WriteAllText((Join-Path $root 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client'), 'BAD!') } else { Remove-Item -LiteralPath (Join-Path $root 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client') }
             Remove-Item -LiteralPath (Join-Path $root 'tw\Game\DATA\FINAL\test1.zh_CN.wad.client')
         }
         $metadataPath = Join-Path $root 'product_settings.yaml'
@@ -166,15 +197,19 @@ try {
         Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Vanguard-Status.ps1') -Destination (Join-Path $root 'Vanguard-Status.ps1')
         Set-Content -LiteralPath $fixturePath -Value $fixture -Encoding utf8
         $env:LOL_TEST_CASE = $case
-        $mode = if ($case -in @('native','restore','traditional','restart','background','background-transition','vanguard216')) { 'Riot' } else { 'Local' }
+        $mode = if ($case -in @('native','restore','traditional','restart','background','background-transition','vanguard216','repair','prepare','cold','initializing','autounlock')) { 'Riot' } else { 'Local' }
         $testLocale = if ($case -eq 'traditional') { 'zh_TW' } else { 'zh_CN' }
-        $output = & $pwsh -NoProfile -File $fixturePath -ResourceSource $mode -Locale $testLocale 2>&1
+        $extra = @()
+        if ($case -eq 'prepare') { $extra = @('-PrepareOnly') }
+        $output = & $pwsh -NoProfile -File $fixturePath -ResourceSource $mode -Locale $testLocale @extra 2>&1
         $exitCode = $LASTEXITCODE
         if ($case -eq 'mismatch') {
             if ($exitCode -ne 1 -or "$output" -notmatch '实际补丁不匹配') { throw "Mismatch was not rejected: $output" }
             if ([IO.File]::ReadAllText((Join-Path $root 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client')) -ne 'OLD!') {
                 throw 'Mismatch modified game resources'
             }
+        } elseif ($case -eq 'prepare') {
+            if ($exitCode -ne 0 -or "$output" -notmatch '未启动游戏客户端') { throw "PrepareOnly failed: $output" }
         } elseif ($case -eq 'vanguard216') {
             if ($exitCode -ne 1 -or "$output" -notmatch 'VAN 216' -or "$output" -match "已以 $testLocale 启动") { throw "Vanguard failure was reported as success: $output" }
         } elseif ($exitCode -ne 0 -or "$output" -notmatch "已以 $testLocale 启动") { throw "Scenario $case failed: $output" }
