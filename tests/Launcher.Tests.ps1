@@ -17,6 +17,10 @@ $script:patchPoll = 0
 $script:testLaunched = $false
 $script:testValidated = $false
 $script:riotRunning = $true
+$script:riotFull = $env:LOL_TEST_CASE -notin @('background','background-transition')
+if ($env:LOL_TEST_CASE -eq 'background-transition') {
+    Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Riot Games\Riot Client\Config\lockfile')
+}
 function Get-Item {
     param([string]$LiteralPath)
     if ($env:LOL_TEST_CASE -eq 'native' -and $LiteralPath -like '*\cn\*') { throw 'Native mode read obsolete CN resources' }
@@ -32,7 +36,12 @@ function Get-Process {
     if ($Name -contains 'RiotClientServices' -and $script:riotRunning) { return [pscustomobject]@{ Id = 1 } }
     if ($Name -contains 'LeagueClient' -and $script:testLaunched) { return [pscustomobject]@{ Id = 2 } }
 }
-function Start-Process { $script:riotRunning = $true }
+function Start-Process {
+    $script:riotRunning = $true; $script:riotFull = $true
+    if ($env:LOL_TEST_CASE -eq 'background-transition') {
+        [IO.File]::WriteAllText((Join-Path $env:LOCALAPPDATA 'Riot Games\Riot Client\Config\lockfile'), 'mock:1:1234:test:https')
+    }
+}
 function Start-Sleep { }
 function Invoke-WebRequest {
     param($Uri, $Method, $Headers, $SkipCertificateCheck, $NoProxy, $TimeoutSec, $ContentType, $Body)
@@ -46,7 +55,13 @@ function Invoke-WebRequest {
         $script:testValidated = $true
         return [pscustomobject]@{ Content = '{}'; StatusCode = 200 }
     }
-    if ($Uri -like '*product-locales*') { return [pscustomobject]@{ Content = ('"' + $Locale + '"'); StatusCode = 200 } }
+    if ($Uri -like '*product-locales*') {
+        if (-not $script:riotFull) {
+            $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::NotFound)
+            throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('Mock background mode', $response)
+        }
+        return [pscustomobject]@{ Content = ('"' + $Locale + '"'); StatusCode = 200 }
+    }
     if ($Uri -like '*eligibility') { return [pscustomobject]@{ Content = 'true'; StatusCode = 200 } }
     if ($Uri -like '*patch-states*') {
         $script:patchPoll++
@@ -85,7 +100,7 @@ function Invoke-WebRequest {
 }
 '@
 try {
-    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore', 'traditional', 'restart')) {
+    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore', 'traditional', 'restart', 'background', 'background-transition')) {
         $root = Join-Path $testRoot $case
         foreach ($path in @('cn\Game\DATA\FINAL','tw\Game\DATA\FINAL',
             'cn\LeagueClient\Plugins\rcp-be-lol-game-data','cn\LeagueClient\Plugins\rcp-fe-lol-typekit',
@@ -109,7 +124,7 @@ try {
             [IO.File]::WriteAllText((Join-Path $root "cn\LeagueClient\Plugins\$plugin\zh_CN-assets.wad"), 'NEW!')
             [IO.File]::WriteAllText((Join-Path $root "tw\Plugins\$plugin\zh_CN-assets.wad"), 'OLD!')
         }
-        if ($case -in @('native','restore','traditional','restart')) {
+        if ($case -in @('native','restore','traditional','restart','background','background-transition')) {
             Get-ChildItem -LiteralPath (Join-Path $root 'cn\Game\DATA\FINAL') -File |
                 Copy-Item -Destination (Join-Path $root 'tw\Game\DATA\FINAL') -Force
             foreach ($plugin in @('rcp-be-lol-game-data', 'rcp-fe-lol-typekit')) {
@@ -137,7 +152,7 @@ try {
         Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Resource-Backup.ps1') -Destination (Join-Path $root 'Resource-Backup.ps1')
         Set-Content -LiteralPath $fixturePath -Value $fixture -Encoding utf8
         $env:LOL_TEST_CASE = $case
-        $mode = if ($case -in @('native','restore','traditional','restart')) { 'Riot' } else { 'Local' }
+        $mode = if ($case -in @('native','restore','traditional','restart','background','background-transition')) { 'Riot' } else { 'Local' }
         $testLocale = if ($case -eq 'traditional') { 'zh_TW' } else { 'zh_CN' }
         $output = & $pwsh -NoProfile -File $fixturePath -ResourceSource $mode -Locale $testLocale 2>&1
         $exitCode = $LASTEXITCODE
@@ -148,6 +163,7 @@ try {
             }
         } elseif ($exitCode -ne 0 -or "$output" -notmatch "已以 $testLocale 启动") { throw "Scenario $case failed: $output" }
         if ($case -eq 'restart' -and "$output" -notmatch '正在重新连接后台') { throw 'Restart scenario did not exercise reconnection' }
+        if ($case -in @('background','background-transition') -and "$output" -notmatch '精简后台模式') { throw 'Background scenario did not wake full Riot mode' }
         Write-Output "PASS $case"
     }
 } finally {

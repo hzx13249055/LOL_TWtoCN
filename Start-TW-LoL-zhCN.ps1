@@ -29,10 +29,35 @@ function Restore-MissingBackup {
     return $restored
 }
 
+function Get-ActiveRiotConnection {
+    try {
+        $connection = Get-RiotConnection
+        $null = Invoke-Riot $connection 'GET' $localePath
+        return $connection
+    } catch {
+        $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+        if ($status -notin @(0,404)) { throw }
+    }
+    # The lightweight background process exposes only riotclientapp APIs.
+    # Starting Riot without a product argument opens full mode without launching League.
+    Write-Status 'Riot 处于精简后台模式或连接切换中，正在打开完整客户端以准备语言切换' | Out-Host
+    Start-Process -FilePath $riotExe -WindowStyle Hidden
+    $deadline = (Get-Date).AddSeconds(60)
+    do {
+        try {
+            $connection = Get-RiotConnection
+            $null = Invoke-Riot $connection 'GET' $localePath 3
+            return $connection
+        } catch { Start-Sleep -Seconds 1 }
+    } while ((Get-Date) -lt $deadline)
+    throw 'Riot 完整客户端未在一分钟内准备好语言接口，请检查 Riot 窗口中的提示后重试'
+}
+
 function Stop-RiotForResourceSwitch {
     if (-not (Get-Process -Name 'RiotClientServices' -ErrorAction SilentlyContinue)) { return }
     if (Get-Process -Name 'League of Legends','LeagueClient' -ErrorAction SilentlyContinue) { throw '请先正常关闭 League 客户端，再切换语言' }
-    $connection = Get-RiotConnection
+    $connection = Get-ActiveRiotConnection
+    if (Get-Process -Name 'League of Legends','LeagueClient' -ErrorAction SilentlyContinue) { throw '检测到客户端或对局，取消语言资源切换' }
     if ($ResourceSource -eq 'Riot') {
         $before = (Invoke-Riot $connection 'GET' '/patch-proxy/v2/patch-states/products/league_of_legends/patchlines/live').Content | ConvertFrom-Json
         $previousLocale = (Invoke-Riot $connection 'GET' $localePath).Content | ConvertFrom-Json
