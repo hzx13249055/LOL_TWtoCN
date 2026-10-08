@@ -96,13 +96,19 @@ function Invoke-WebRequest {
             throw 'Same-size client resource was not refreshed'
         }
         $script:testLaunched = $true
+        $logs = Join-Path $PSScriptRoot 'tw\Logs\LeagueClient Logs'
+        New-Item -ItemType Directory -Path $logs -Force | Out-Null
+        $message = if ($env:LOL_TEST_CASE -eq 'vanguard216') {
+            "000001.000| ALWAYS| rcp-be-lol-vanguard| Disconnecting from Vanguard client: '216'"
+        } else { '000001.000| ALWAYS| rcp-be-lol-vanguard| Successfully logged in to Vanguard client.' }
+        [IO.File]::WriteAllText((Join-Path $logs ((Get-Date -Format 'yyyy-MM-ddTHH-mm-ss') + '_2_LeagueClient.log')), $message)
         return [pscustomobject]@{ Content = '{}'; StatusCode = 200 }
     }
     throw 'Unexpected API request'
 }
 '@
 try {
-    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore', 'traditional', 'restart', 'background', 'background-transition')) {
+    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore', 'traditional', 'restart', 'background', 'background-transition', 'vanguard216')) {
         $root = Join-Path $testRoot $case
         foreach ($path in @('cn\Game\DATA\FINAL','tw\Game\DATA\FINAL',
             'cn\LeagueClient\Plugins\rcp-be-lol-game-data','cn\LeagueClient\Plugins\rcp-fe-lol-typekit',
@@ -126,7 +132,7 @@ try {
             [IO.File]::WriteAllText((Join-Path $root "cn\LeagueClient\Plugins\$plugin\zh_CN-assets.wad"), 'NEW!')
             [IO.File]::WriteAllText((Join-Path $root "tw\Plugins\$plugin\zh_CN-assets.wad"), 'OLD!')
         }
-        if ($case -in @('native','restore','traditional','restart','background','background-transition')) {
+        if ($case -in @('native','restore','traditional','restart','background','background-transition','vanguard216')) {
             Get-ChildItem -LiteralPath (Join-Path $root 'cn\Game\DATA\FINAL') -File |
                 Copy-Item -Destination (Join-Path $root 'tw\Game\DATA\FINAL') -Force
             foreach ($plugin in @('rcp-be-lol-game-data', 'rcp-fe-lol-typekit')) {
@@ -157,9 +163,10 @@ try {
         $fixturePath = Join-Path $root 'launcher.ps1'
         Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Resource-Backup.ps1') -Destination (Join-Path $root 'Resource-Backup.ps1')
         Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Product-Locale.ps1') -Destination (Join-Path $root 'Product-Locale.ps1')
+        Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Vanguard-Status.ps1') -Destination (Join-Path $root 'Vanguard-Status.ps1')
         Set-Content -LiteralPath $fixturePath -Value $fixture -Encoding utf8
         $env:LOL_TEST_CASE = $case
-        $mode = if ($case -in @('native','restore','traditional','restart','background','background-transition')) { 'Riot' } else { 'Local' }
+        $mode = if ($case -in @('native','restore','traditional','restart','background','background-transition','vanguard216')) { 'Riot' } else { 'Local' }
         $testLocale = if ($case -eq 'traditional') { 'zh_TW' } else { 'zh_CN' }
         $output = & $pwsh -NoProfile -File $fixturePath -ResourceSource $mode -Locale $testLocale 2>&1
         $exitCode = $LASTEXITCODE
@@ -168,6 +175,8 @@ try {
             if ([IO.File]::ReadAllText((Join-Path $root 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client')) -ne 'OLD!') {
                 throw 'Mismatch modified game resources'
             }
+        } elseif ($case -eq 'vanguard216') {
+            if ($exitCode -ne 1 -or "$output" -notmatch 'VAN 216' -or "$output" -match "已以 $testLocale 启动") { throw "Vanguard failure was reported as success: $output" }
         } elseif ($exitCode -ne 0 -or "$output" -notmatch "已以 $testLocale 启动") { throw "Scenario $case failed: $output" }
         if ($case -eq 'restart' -and "$output" -notmatch '正在重新连接后台') { throw 'Restart scenario did not exercise reconnection' }
         if ($case -in @('background','background-transition') -and "$output" -notmatch '精简后台模式') { throw 'Background scenario did not wake full Riot mode' }

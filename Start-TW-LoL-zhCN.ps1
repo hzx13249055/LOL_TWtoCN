@@ -16,6 +16,7 @@ $mutex = $null
 $ownsMutex = $false
 . (Join-Path $PSScriptRoot 'Resource-Backup.ps1')
 . (Join-Path $PSScriptRoot 'Product-Locale.ps1')
+. (Join-Path $PSScriptRoot 'Vanguard-Status.ps1')
 
 function Set-StartupLocale {
     $arguments = @{GameRoot=$twRoot;Locale=$Locale}
@@ -230,6 +231,7 @@ try {
 
     if (Get-Process -Name 'League of Legends' -ErrorAction SilentlyContinue) { throw '对局正在运行，请勿切换语言' }
     if (Get-Process -Name 'LeagueClient' -ErrorAction SilentlyContinue) { throw '请先关闭已打开的 League 客户端' }
+    Assert-VanguardCooldown $twRoot
 
     $needsValidation = $false
     Stop-RiotForResourceSwitch
@@ -378,6 +380,10 @@ try {
     }
     $current = (Invoke-Riot (Get-RiotConnection) 'GET' $localePath).Content | ConvertFrom-Json
     if ($current -ne $Locale) { throw "客户端已打开，但 Riot 语言变为 $current；所选语言启动未确认成功" }
+    $clientProcess = Get-Process -Name LeagueClient -ErrorAction Stop | Select-Object -First 1
+    Write-Status '客户端已打开，正在确认 Vanguard 登录状态'
+    Wait-VanguardLogin $twRoot $clientProcess.Id
+    Write-Status 'Vanguard 登录已确认正常'
     Write-Status "已以 $Locale 启动台服英雄联盟"
 } catch {
     $failure = $_.Exception.Message

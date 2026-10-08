@@ -42,6 +42,13 @@ pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -Locale zh_TW -CheckOnly
 - 更新默认最多等待 120 分钟；网络较慢时可使用 `-WaitMinutes 1440` 延长。重复点击只允许一个启动器运行。桌面入口失败时显示原因；Riot 接受请求后还会确认 League 客户端已打开。
 - Riot 后台重启导致本地接口暂时返回 404 时，启动器最多等待一分钟并重新读取连接信息；接口持续不可用时会报告错误。
 - 日志保存在 `%LOCALAPPDATA%\LOL_TWtoCN\launcher.log`，不进入 Git。
+- 客户端打开后还会确认 Vanguard 登录成功，再报告启动成功；检测到反作弊断开或客户端退出时会显示原因。
+
+## Vanguard VAN 216
+
+[Riot 官方说明](https://support.riotgames.com/en-us/riot/performance/error-van-216/)：短时间多次启动可能触发 VAN 216，应停止点击开始，至少等待 30 分钟；提前再次尝试会重置等待时间。
+
+入口会从本机客户端日志识别 VAN 216，并在启动 Riot、修改配置或恢复资源之前显示可重试时间。仅点击被冷却检查阻止的本入口不会增加游戏启动次数；冷却期间请勿从 Riot 或其他入口点击开始。此检查不绕过 Vanguard，也不修改其配置。Vanguard 日志不上传 Git。
 
 ## 自动本地备份
 
@@ -89,6 +96,7 @@ pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -ResourceSource Local -ShowErrors
 pwsh -NoProfile -File .\tests\Launcher.Tests.ps1
 pwsh -NoProfile -File .\tests\Resource-Backup.Tests.ps1
 pwsh -NoProfile -File .\tests\Product-Locale.Tests.ps1
+pwsh -NoProfile -File .\tests\Vanguard-Status.Tests.ps1
 ```
 
 隔离测试覆盖版本不匹配保护、同大小资源更新、完整更新后启动、缓存校验、语言隔离、安全释放、旧缓存兼容、后台重连，以及官方模式不读取较旧国服资源。测试不访问 Riot、不修改已安装游戏文件。
