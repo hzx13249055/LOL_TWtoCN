@@ -3,7 +3,8 @@ param(
     [string]$CacheRoot,
     [Parameter(Mandatory = $true)][string]$TwRoot,
     [string]$RiotClientExe = 'C:\Riot Games\Riot Client\RiotClientServices.exe',
-    [string]$ShortcutPath = (Join-Path ([Environment]::GetFolderPath('Desktop')) '台服 LOL 简体中文.lnk')
+    [string]$ShortcutPath = (Join-Path ([Environment]::GetFolderPath('Desktop')) '台服 LOL 简体中文.lnk'),
+    [string]$TraditionalShortcutPath = (Join-Path ([Environment]::GetFolderPath('Desktop')) '台服 LOL 繁体中文.lnk')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,6 +21,7 @@ foreach ($path in @(
     (Join-Path $tw 'Game\League of Legends.exe'),
     (Join-Path $tw 'Game\DATA\FINAL'),
     (Join-Path $tw 'Plugins'),
+    (Join-Path $PSScriptRoot 'Resource-Backup.ps1'),
     $launcher
 )) {
     if (-not (Test-Path -LiteralPath $path)) { throw "缺少所需文件或目录：$path" }
@@ -36,15 +38,17 @@ $config = [ordered]@{
 }
 $config | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $configPath -Encoding utf8
 
-$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($ShortcutPath)
-$shortcut.TargetPath = $pwsh
-$shortcut.Arguments = '-NoProfile -File "' + $launcher + '" -ShowErrors'
-$shortcut.WorkingDirectory = $PSScriptRoot
-$shortcut.IconLocation = (Join-Path $tw 'LeagueClient.exe') + ',0'
-$shortcut.Description = '使用 zh_CN 资源启动台服英雄联盟'
-$shortcut.Save()
+foreach ($entry in @(@{Path=$ShortcutPath;Locale='zh_CN'},@{Path=$TraditionalShortcutPath;Locale='zh_TW'})) {
+    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($entry.Path)
+    $shortcut.TargetPath = $pwsh
+    $shortcut.Arguments = '-NoProfile -File "' + $launcher + '" -Locale ' + $entry.Locale + ' -ShowErrors'
+    $shortcut.WorkingDirectory = $PSScriptRoot
+    $shortcut.IconLocation = (Join-Path $tw 'LeagueClient.exe') + ',0'
+    $shortcut.Description = '使用 ' + $entry.Locale + ' 资源启动台服英雄联盟'
+    $shortcut.Save()
+    Write-Output "已创建桌面入口：$($entry.Path)"
+}
 
 Write-Output "已保存本机配置：$configPath"
-Write-Output "已创建桌面入口：$ShortcutPath"
 & $pwsh -NoProfile -File $launcher -CheckOnly
 if ($LASTEXITCODE -ne 0) { throw '只读检查未通过，请核对游戏版本及资源。' }

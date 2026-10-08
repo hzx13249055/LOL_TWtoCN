@@ -23,11 +23,11 @@ function Get-BackupVersionKey([string]$GameRoot) {
     return (($version -split '\+')[0] + '-' + $digest)
 }
 
-function Get-BackupEntryPath([string]$GameRoot, [string]$RelativePath) {
+function Get-BackupEntryPath([string]$GameRoot, [string]$RelativePath, [ValidateSet('zh_CN','zh_TW')][string]$Locale = 'zh_CN') {
     $relative = $RelativePath.Replace('\', '/')
     if ([IO.Path]::IsPathRooted($relative) -or '..' -in ($relative -split '/') -or $relative.Contains(':') -or
-        ($relative -notmatch '^Game/DATA/FINAL/.+\.zh_CN\.wad\.client$' -and
-         $relative -notin @('Plugins/rcp-be-lol-game-data/zh_CN-assets.wad','Plugins/rcp-fe-lol-typekit/zh_CN-assets.wad'))) {
+        ($relative -notmatch ('^Game/DATA/FINAL/.+\.' + [regex]::Escape($Locale) + '\.wad\.client$') -and
+         $relative -notin @("Plugins/rcp-be-lol-game-data/$Locale-assets.wad","Plugins/rcp-fe-lol-typekit/$Locale-assets.wad"))) {
         throw "备份中的资源路径无效：$RelativePath"
     }
     $root = [IO.Path]::GetFullPath($GameRoot).TrimEnd('\') + '\'
@@ -36,14 +36,14 @@ function Get-BackupEntryPath([string]$GameRoot, [string]$RelativePath) {
     return $path
 }
 
-function Save-ResourceBackup([string]$GameRoot, [string]$CacheRoot) {
+function Save-ResourceBackup([string]$GameRoot, [string]$CacheRoot, [ValidateSet('zh_CN','zh_TW')][string]$Locale = 'zh_CN') {
     Assert-BackupLocation $GameRoot $CacheRoot
     $key = Get-BackupVersionKey $GameRoot
-    $gameFiles = @(Get-ChildItem -LiteralPath (Join-Path $GameRoot 'Game\DATA\FINAL') -Recurse -File -Filter '*.zh_CN.wad.client')
-    if ($gameFiles.Count -lt 100 -or -not ($gameFiles | Where-Object Name -eq 'Global.zh_CN.wad.client')) { throw '简中资源不完整，不能更新备份' }
+    $gameFiles = @(Get-ChildItem -LiteralPath (Join-Path $GameRoot 'Game\DATA\FINAL') -Recurse -File -Filter "*.$Locale.wad.client")
+    if ($gameFiles.Count -lt 100 -or -not ($gameFiles | Where-Object Name -eq "Global.$Locale.wad.client")) { throw "$Locale 资源不完整，不能更新备份" }
     $resourceFiles = @($gameFiles) + @(
-        (Get-Item -LiteralPath (Join-Path $GameRoot 'Plugins\rcp-be-lol-game-data\zh_CN-assets.wad') -ErrorAction Stop),
-        (Get-Item -LiteralPath (Join-Path $GameRoot 'Plugins\rcp-fe-lol-typekit\zh_CN-assets.wad') -ErrorAction Stop)
+        (Get-Item -LiteralPath (Join-Path $GameRoot "Plugins\rcp-be-lol-game-data\$Locale-assets.wad") -ErrorAction Stop),
+        (Get-Item -LiteralPath (Join-Path $GameRoot "Plugins\rcp-fe-lol-typekit\$Locale-assets.wad") -ErrorAction Stop)
     )
     $root = [IO.Path]::GetFullPath($GameRoot).TrimEnd('\')
     $entries = @($resourceFiles | ForEach-Object {
@@ -59,7 +59,7 @@ function Save-ResourceBackup([string]$GameRoot, [string]$CacheRoot) {
     $added = 0
     $addedBytes = 0L
     foreach ($entry in $entries) {
-        $source = Get-BackupEntryPath $GameRoot $entry.path
+        $source = Get-BackupEntryPath $GameRoot $entry.path $Locale
         $object = Join-Path $objects ($entry.sha256 + '.wad')
         if ((Test-Path -LiteralPath $object -PathType Leaf) -and
             (Get-Item -LiteralPath $object).Length -eq $entry.length -and
@@ -78,10 +78,10 @@ function Save-ResourceBackup([string]$GameRoot, [string]$CacheRoot) {
         $addedBytes += $entry.length
     }
     if ((Get-BackupVersionKey $GameRoot) -ne $key) { throw '备份期间游戏版本发生变化，未发布新的备份清单' }
-    $index = Join-Path $versions ($key + '.cache.json')
+    $index = Join-Path $versions ($key + '.' + $Locale + '.cache.json')
     $temporaryIndex = $index + '.' + [guid]::NewGuid() + '.partial'
     try {
-        @{ schema=1; versionKey=$key; locale='zh_CN'; createdUtc=[DateTime]::UtcNow.ToString('o'); entries=$entries } |
+        @{ schema=1; versionKey=$key; locale=$Locale; createdUtc=[DateTime]::UtcNow.ToString('o'); entries=$entries } |
             ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $temporaryIndex -Encoding utf8
         [IO.File]::Move($temporaryIndex, $index, $true)
     } finally {
@@ -90,23 +90,33 @@ function Save-ResourceBackup([string]$GameRoot, [string]$CacheRoot) {
     return [pscustomobject]@{ FileCount=$entries.Count; AddedFiles=$added; AddedBytes=$addedBytes; VersionKey=$key }
 }
 
-function Restore-ResourceBackup([string]$GameRoot, [string]$CacheRoot) {
+function Read-ResourceBackup([string]$GameRoot, [string]$CacheRoot, [ValidateSet('zh_CN','zh_TW')][string]$Locale = 'zh_CN') {
     Assert-BackupLocation $GameRoot $CacheRoot
     $key = Get-BackupVersionKey $GameRoot
-    $index = Join-Path (Join-Path $CacheRoot 'versions') ($key + '.cache.json')
-    if (-not (Test-Path -LiteralPath $index -PathType Leaf)) { return [pscustomobject]@{ Restored=0; Rejected=0; Found=$false } }
+    $index = Join-Path (Join-Path $CacheRoot 'versions') ($key + '.' + $Locale + '.cache.json')
+    if ($Locale -eq 'zh_CN' -and -not (Test-Path -LiteralPath $index -PathType Leaf)) {
+        # Keep existing single-language backups usable after upgrading.
+        $index = Join-Path (Join-Path $CacheRoot 'versions') ($key + '.cache.json')
+    }
+    if (-not (Test-Path -LiteralPath $index -PathType Leaf)) { return $null }
     $manifest = Get-Content -LiteralPath $index -Raw -Encoding utf8 | ConvertFrom-Json
-    if ($manifest.schema -ne 1 -or $manifest.versionKey -ne $key -or $manifest.locale -ne 'zh_CN') { throw '本地备份清单与当前完整资源版本不匹配' }
+    if ($manifest.schema -ne 1 -or $manifest.versionKey -ne $key -or $manifest.locale -ne $Locale) { throw '本地备份清单与当前完整资源版本或语言不匹配' }
     # Validate every path before writing any file; indexes are data, never code.
     $entries = @($manifest.entries)
     foreach ($entry in $entries) {
-        $null = Get-BackupEntryPath $GameRoot $entry.path
+        $null = Get-BackupEntryPath $GameRoot $entry.path $Locale
         if ($entry.sha256 -notmatch '^[0-9A-Fa-f]{64}$' -or $entry.length -lt 0) { throw '本地备份清单内容无效' }
     }
+    return $manifest
+}
+
+function Restore-ResourceBackup([string]$GameRoot, [string]$CacheRoot, [ValidateSet('zh_CN','zh_TW')][string]$Locale = 'zh_CN') {
+    $manifest = Read-ResourceBackup $GameRoot $CacheRoot $Locale
+    if ($null -eq $manifest) { return [pscustomobject]@{ Restored=0; Rejected=0; Found=$false } }
     $restored = 0
     $rejected = 0
-    foreach ($entry in $entries) {
-        $destination = Get-BackupEntryPath $GameRoot $entry.path
+    foreach ($entry in $manifest.entries) {
+        $destination = Get-BackupEntryPath $GameRoot $entry.path $Locale
         if (Test-Path -LiteralPath $destination) { continue }
         $object = Join-Path (Join-Path $CacheRoot 'objects') ($entry.sha256.ToUpperInvariant() + '.wad')
         if (-not (Test-Path -LiteralPath $object -PathType Leaf) -or
@@ -124,4 +134,30 @@ function Restore-ResourceBackup([string]$GameRoot, [string]$CacheRoot) {
         $restored++
     }
     return [pscustomobject]@{ Restored=$restored; Rejected=$rejected; Found=$true }
+}
+
+function Release-BackedUpLanguage([string]$GameRoot, [string]$CacheRoot, [ValidateSet('zh_CN','zh_TW')][string]$Locale) {
+    $manifest = Read-ResourceBackup $GameRoot $CacheRoot $Locale
+    if ($null -eq $manifest) { return [pscustomobject]@{ Released=0; Bytes=0; Unverified=0 } }
+    $approved = [Collections.Generic.List[object]]::new()
+    $unverified = 0
+    foreach ($entry in $manifest.entries) {
+        $path = Get-BackupEntryPath $GameRoot $entry.path $Locale
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        $object = Join-Path (Join-Path $CacheRoot 'objects') ($entry.sha256.ToUpperInvariant() + '.wad')
+        if (-not (Test-Path -LiteralPath $object -PathType Leaf) -or
+            (Get-Item -LiteralPath $object).Length -ne $entry.length -or
+            (Get-Item -LiteralPath $path).Length -ne $entry.length -or
+            (Get-FileHash -LiteralPath $object -Algorithm SHA256).Hash -ne $entry.sha256 -or
+            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $entry.sha256) { $unverified++; continue }
+        $approved.Add([pscustomobject]@{ Path=$path; Length=$entry.length })
+    }
+    if ((Get-BackupVersionKey $GameRoot) -ne $manifest.versionKey) { throw '版本已变化，取消释放语言资源' }
+    $bytes = 0L
+    foreach ($file in $approved) {
+        # Every exact file has a separate, verified copy in the cache.
+        Remove-Item -LiteralPath $file.Path -ErrorAction Stop
+        $bytes += $file.Length
+    }
+    return [pscustomobject]@{ Released=$approved.Count; Bytes=$bytes; Unverified=$unverified }
 }

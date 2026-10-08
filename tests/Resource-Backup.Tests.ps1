@@ -38,7 +38,7 @@ try {
     $wrongVersion = Restore-ResourceBackup $gameRoot $cacheRoot
     Assert (-not $wrongVersion.Found -and -not (Test-Path -LiteralPath $globalFile)) 'Backup crossed full resource versions'
     [IO.File]::WriteAllText($metadata, '{"version":"16.20.1+content.release"}')
-    $indexPath = Join-Path $cacheRoot ('versions\' + $first.VersionKey + '.cache.json')
+    $indexPath = Join-Path $cacheRoot ('versions\' + $first.VersionKey + '.zh_CN.cache.json')
     $indexText = Get-Content -LiteralPath $indexPath -Raw
     $index = $indexText | ConvertFrom-Json
     $globalEntry = $index.entries | Where-Object path -eq 'Game/DATA/FINAL/Global.zh_CN.wad.client'
@@ -58,6 +58,31 @@ try {
     $repaired = Save-ResourceBackup $gameRoot $cacheRoot
     Assert ($repaired.AddedFiles -eq 1 -and [IO.File]::ReadAllText($objectPath) -eq 'original') 'Backup did not repair a corrupted cache object'
     Write-Output 'PASS path validation and cache repair'
+
+    [IO.File]::WriteAllText((Join-Path $final 'Global.zh_TW.wad.client'), 'traditional')
+    1..100 | ForEach-Object { [IO.File]::WriteAllText((Join-Path $final "Champions\test$_.zh_TW.wad.client"), 'tw voice') }
+    foreach ($plugin in @('rcp-be-lol-game-data','rcp-fe-lol-typekit')) {
+        [IO.File]::WriteAllText((Join-Path $gameRoot "Plugins\$plugin\zh_TW-assets.wad"), 'tw text')
+    }
+    $traditional = Save-ResourceBackup $gameRoot $cacheRoot 'zh_TW'
+    Assert ($traditional.FileCount -eq 103 -and (Test-Path -LiteralPath (Join-Path $cacheRoot ('versions\' + $traditional.VersionKey + '.zh_TW.cache.json')))) 'Traditional language did not get its own index'
+    $released = Release-BackedUpLanguage $gameRoot $cacheRoot 'zh_CN'
+    Assert ($released.Released -eq 103 -and -not (Test-Path -LiteralPath $globalFile) -and
+        (Test-Path -LiteralPath (Join-Path $final 'Global.zh_TW.wad.client'))) 'Releasing CN touched TW files or left verified CN resources'
+    $cnRestored = Restore-ResourceBackup $gameRoot $cacheRoot 'zh_CN'
+    Assert ($cnRestored.Restored -eq 103 -and [IO.File]::ReadAllText($globalFile) -eq 'original') 'CN restore did not preserve its separate resource content'
+    [IO.File]::WriteAllText($objectPath, 'corrupt!')
+    $protected = Release-BackedUpLanguage $gameRoot $cacheRoot 'zh_CN'
+    Assert ($protected.Unverified -eq 1 -and (Test-Path -LiteralPath $globalFile)) 'Release deleted a resource whose cache was corrupted'
+    $null = Restore-ResourceBackup $gameRoot $cacheRoot 'zh_CN'
+    $null = Save-ResourceBackup $gameRoot $cacheRoot 'zh_CN'
+    $legacyIndex = Join-Path $cacheRoot ('versions\' + $first.VersionKey + '.cache.json')
+    Move-Item -LiteralPath $indexPath -Destination $legacyIndex
+    Remove-Item -LiteralPath $voiceFile
+    $legacy = Restore-ResourceBackup $gameRoot $cacheRoot 'zh_CN'
+    Assert ($legacy.Restored -eq 1 -and (Test-Path -LiteralPath $voiceFile)) 'Existing CN-only backup was not compatible'
+    $null = Save-ResourceBackup $gameRoot $cacheRoot 'zh_CN'
+    Write-Output 'PASS language isolation, safe release and legacy compatibility'
 
     [IO.File]::WriteAllText($metadata, '{"version":"16.20.2+content.release"}')
     [IO.File]::WriteAllText($globalFile, 'new version')
