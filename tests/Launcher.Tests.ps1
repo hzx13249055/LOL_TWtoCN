@@ -37,10 +37,16 @@ function Invoke-WebRequest {
     if ($Uri -like '*eligibility') { return [pscustomobject]@{ Content = 'true'; StatusCode = 200 } }
     if ($Uri -like '*patch-states*') {
         $script:patchPoll++
-        $state = if ($env:LOL_TEST_CASE -eq 'updating' -and $script:patchPoll -eq 1) { 'updating' } else { 'up_to_date' }
+        $state = if ($env:LOL_TEST_CASE -in @('updating','partial') -and $script:patchPoll -eq 1) { 'updating' } else { 'up_to_date' }
         $ready = $state -eq 'up_to_date'
         $state = if ($ready) { 'UpToDate' } else { 'Updating' }
+        if ($env:LOL_TEST_CASE -eq 'partial' -and $script:patchPoll -eq 1) { $state = 'Paused'; $ready = $true }
         return [pscustomobject]@{ Content = (@{ state=$state; launchable=$ready; progress=@{totalBytesDownloaded=1;totalBytesToDownload=4} } | ConvertTo-Json); StatusCode = 200 }
+    }
+    if ($Uri -like '*priority-patch*') {
+        $target = Join-Path $PSScriptRoot 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client'
+        if ([IO.File]::ReadAllText($target) -ne 'OLD!') { throw 'Resources were overwritten while patching' }
+        return [pscustomobject]@{ Content = '[]'; StatusCode = 201 }
     }
     if ($Method -eq 'POST') {
         $target = Join-Path $PSScriptRoot 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client'
@@ -61,7 +67,7 @@ function Invoke-WebRequest {
 }
 '@
 try {
-    foreach ($case in @('mismatch', 'ready', 'updating', 'native')) {
+    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native')) {
         $root = Join-Path $testRoot $case
         foreach ($path in @('cn\Game\DATA\FINAL','tw\Game\DATA\FINAL',
             'cn\LeagueClient\Plugins\rcp-be-lol-game-data','cn\LeagueClient\Plugins\rcp-fe-lol-typekit',

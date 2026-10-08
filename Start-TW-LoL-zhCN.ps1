@@ -181,6 +181,7 @@ try {
     $launched = $false
     $deadline = (Get-Date).AddMinutes($WaitMinutes)
     $resourcesReady = $false
+    $patchQueued = $false
     do {
         try {
             $connection = Get-RiotConnection
@@ -207,11 +208,17 @@ try {
                 }
             } else {
                 $resourcesReady = $false
-                # The product launch request lets Riot start pending updates.
-                # Do not write resources while its patcher is working.
                 $downloaded = [math]::Round($patch.progress.totalBytesDownloaded / 1MB)
                 $total = [math]::Round($patch.progress.totalBytesToDownload / 1MB)
                 Write-Status "Riot 正在检查或更新资源：$($patch.state)，已下载 $downloaded/$total MB，最多等待 $WaitMinutes 分钟"
+                # Launch can pause unfinished voice downloads even when Riot
+                # says launchable. Request patching separately and wait fully.
+                if (-not $patchQueued) {
+                    $null = Invoke-Riot $connection 'PUT' '/patch-proxy/v2/priority-patch/products/league_of_legends/patchlines/live' '{}'
+                    $patchQueued = $true
+                }
+                Start-Sleep -Seconds 10
+                continue
             }
             $null = Invoke-Riot $connection 'POST' '/product-launcher/v1/products/league_of_legends/patchlines/live' '{}' 30
             if ($resourcesReady) { $launched = $true; break }
