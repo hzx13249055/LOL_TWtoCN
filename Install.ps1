@@ -22,6 +22,7 @@ foreach ($path in @(
     (Join-Path $tw 'Game\DATA\FINAL'),
     (Join-Path $tw 'Plugins'),
     (Join-Path $PSScriptRoot 'Resource-Backup.ps1'),
+    (Join-Path $PSScriptRoot 'Product-Locale.ps1'),
     $launcher
 )) {
     if (-not (Test-Path -LiteralPath $path)) { throw "缺少所需文件或目录：$path" }

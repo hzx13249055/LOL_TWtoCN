@@ -37,6 +37,8 @@ function Get-Process {
     if ($Name -contains 'LeagueClient' -and $script:testLaunched) { return [pscustomobject]@{ Id = 2 } }
 }
 function Start-Process {
+    $metadata = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'product_settings.yaml'))
+    if ($metadata -notmatch ('default_locale: "' + $Locale + '"')) { throw 'Riot opened before default locale was staged' }
     $script:riotRunning = $true; $script:riotFull = $true
     if ($env:LOL_TEST_CASE -eq 'background-transition') {
         [IO.File]::WriteAllText((Join-Path $env:LOCALAPPDATA 'Riot Games\Riot Client\Config\lockfile'), 'mock:1:1234:test:https')
@@ -144,12 +146,17 @@ try {
             Remove-Item -LiteralPath (Join-Path $root 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client')
             Remove-Item -LiteralPath (Join-Path $root 'tw\Game\DATA\FINAL\test1.zh_CN.wad.client')
         }
-        @{ cnRoot=(Join-Path $root 'cn'); twRoot=(Join-Path $root 'tw'); riotClientExe=(Join-Path $root 'riot.exe') } |
+        $metadataPath = Join-Path $root 'product_settings.yaml'
+        @('locale_data:', '    available_locales:', '    - "zh_TW"', '    default_locale: "zh_TW"',
+          ('product_install_full_path: "' + (Join-Path $root 'tw').Replace('\','/') + '"'),
+          'settings:', '    locale: "zh_TW"', 'patching_policy: "manual"') | Set-Content -LiteralPath $metadataPath
+        @{ cnRoot=(Join-Path $root 'cn'); twRoot=(Join-Path $root 'tw'); riotClientExe=(Join-Path $root 'riot.exe'); productSettingsPath=$metadataPath } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'config.local.json') -Encoding utf8
         $fixture = $source.Insert($ast.ParamBlock.Extent.EndOffset, "`n$mocks`n")
         $fixture = $fixture.Replace("'Local\LOL_TWtoCN_Launcher'", "'Local\LOL_TWtoCN_Test_$([guid]::NewGuid())'")
         $fixturePath = Join-Path $root 'launcher.ps1'
         Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Resource-Backup.ps1') -Destination (Join-Path $root 'Resource-Backup.ps1')
+        Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Product-Locale.ps1') -Destination (Join-Path $root 'Product-Locale.ps1')
         Set-Content -LiteralPath $fixturePath -Value $fixture -Encoding utf8
         $env:LOL_TEST_CASE = $case
         $mode = if ($case -in @('native','restore','traditional','restart','background','background-transition')) { 'Riot' } else { 'Local' }

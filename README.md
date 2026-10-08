@@ -30,6 +30,8 @@ pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -Locale zh_TW -CheckOnly
 ## 工作方式
 
 - 启动时通过 Riot 本地接口指定所选语言，在启动游戏前再次确认。Riot 可能改写产品 YAML，不依赖手工修改 YAML 的持久性。
+- 完整 Riot 启动前，以及唤醒精简后台前，会核对产品配置指向当前台服安装目录，并同步默认语言、可用语言与所选语言。仅启动后设置语言存在竞态：Riot 可能先按繁中默认值删除简中素材。配置被 Riot 重写后，下一次入口会重新同步。
+- 产品配置首次修改前，在同目录保存 `.LOL_TWtoCN.original` 本机备份。结构或安装路径不匹配时停止修改；该备份不上传仓库。
 - 正常退出已在后台运行的 Riot，准备缓存后重新打开，避免恢复资源前便开始下载。不会强制结束游戏；其他 Riot 游戏导致后台无法正常退出时，会提示关闭后重试。
 - 关闭 Riot 窗口后可能只剩精简后台，LOL 接口返回 404。启动器会先打开完整 Riot 客户端，再正常退出并准备缓存；不会直接把精简后台当作可用的 LOL 接口。
 - 使用 Riot 的 v2 完整更新状态，覆盖游戏及客户端；等待更新完成后，确认简中资源存在，再启动 League 客户端。v1 状态可能显示客户端已更新，但游戏仍在下载。
@@ -86,6 +88,7 @@ pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -ResourceSource Local -ShowErrors
 ```powershell
 pwsh -NoProfile -File .\tests\Launcher.Tests.ps1
 pwsh -NoProfile -File .\tests\Resource-Backup.Tests.ps1
+pwsh -NoProfile -File .\tests\Product-Locale.Tests.ps1
 ```
 
 隔离测试覆盖版本不匹配保护、同大小资源更新、完整更新后启动、缓存校验、语言隔离、安全释放、旧缓存兼容、后台重连，以及官方模式不读取较旧国服资源。测试不访问 Riot、不修改已安装游戏文件。

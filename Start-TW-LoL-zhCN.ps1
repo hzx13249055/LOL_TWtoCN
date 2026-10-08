@@ -15,6 +15,14 @@ $logPath = Join-Path $logDir 'launcher.log'
 $mutex = $null
 $ownsMutex = $false
 . (Join-Path $PSScriptRoot 'Resource-Backup.ps1')
+. (Join-Path $PSScriptRoot 'Product-Locale.ps1')
+
+function Set-StartupLocale {
+    $arguments = @{GameRoot=$twRoot;Locale=$Locale}
+    if ($config.productSettingsPath) { $arguments.MetadataPath = $config.productSettingsPath }
+    $null = Set-OfflineProductLocale @arguments
+    Write-Status "已在 Riot 启动前同步默认语言与所选语言：$Locale" | Out-Host
+}
 
 function Save-VerifiedBackup {
     Write-Status "正在核对并保存本地 $Locale 备份：$cacheRoot"
@@ -41,6 +49,7 @@ function Get-ActiveRiotConnection {
     # The lightweight background process exposes only riotclientapp APIs.
     # Starting Riot without a product argument opens full mode without launching League.
     Write-Status 'Riot 处于精简后台模式或连接切换中，正在打开完整客户端以准备语言切换' | Out-Host
+    Set-StartupLocale
     Start-Process -FilePath $riotExe -WindowStyle Hidden
     $deadline = (Get-Date).AddSeconds(60)
     do {
@@ -225,6 +234,7 @@ try {
     $needsValidation = $false
     Stop-RiotForResourceSwitch
     if (-not (Get-Process -Name 'RiotClientServices' -ErrorAction SilentlyContinue)) {
+        Set-StartupLocale
         if ($ResourceSource -eq 'Riot') {
             $otherLocale = if ($Locale -eq 'zh_CN') { 'zh_TW' } else { 'zh_CN' }
             try {
