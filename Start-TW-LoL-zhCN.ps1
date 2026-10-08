@@ -254,6 +254,7 @@ try {
     $deadline = (Get-Date).AddMinutes($WaitMinutes)
     $resourcesReady = $false
     $patchQueued = $false
+    $apiUnavailableSince = $null
     do {
         try {
             if (Get-Process -Name 'League of Legends','LeagueClient' -ErrorAction SilentlyContinue) {
@@ -264,6 +265,7 @@ try {
             if ($current -ne $Locale) { $null = Invoke-Riot $connection 'PUT' $localePath $localeJson; $resourcesReady = $false }
             # v1 reports only one patchline. v2 covers game and client updates.
             $patch = (Invoke-Riot $connection 'GET' '/patch-proxy/v2/patch-states/products/league_of_legends/patchlines/live').Content | ConvertFrom-Json
+            $apiUnavailableSince = $null
             if ($null -ne $patch.error -or $patch.state -in @('Error','Failed')) {
                 throw "Riot 更新失败（$($patch.state)）；请查看 Riot 客户端中的更新错误后重试"
             }
@@ -318,7 +320,14 @@ try {
             $status = 0
             if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
             $timedOut = $_.Exception.Message -match 'Timeout|timed out|超时'
-            if ($status -ne 423 -and $status -ne 424 -and -not $timedOut) { throw }
+            if ($status -eq 404) {
+                # Riot can restart itself for a client update. Re-read the
+                # lockfile on the next poll, but reject persistently missing APIs.
+                if ($null -eq $apiUnavailableSince) { $apiUnavailableSince = Get-Date }
+                if (((Get-Date) - $apiUnavailableSince).TotalSeconds -ge 60) { throw }
+                $patchQueued = $false
+                Write-Status 'Riot 本地接口暂时未就绪，正在重新连接后台（最多一分钟）'
+            } elseif ($status -ne 423 -and $status -ne 424 -and -not $timedOut) { throw }
             $resourcesReady = $false
             Write-Status "Riot 尚未允许启动（$status），继续等待资源检查或更新"
         }

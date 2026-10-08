@@ -50,6 +50,10 @@ function Invoke-WebRequest {
     if ($Uri -like '*eligibility') { return [pscustomobject]@{ Content = 'true'; StatusCode = 200 } }
     if ($Uri -like '*patch-states*') {
         $script:patchPoll++
+        if ($env:LOL_TEST_CASE -eq 'restart' -and $script:patchPoll -eq 2) {
+            $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::NotFound)
+            throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('Mock Riot restarting', $response)
+        }
         $state = if ($env:LOL_TEST_CASE -in @('updating','partial') -and $script:patchPoll -eq 1) { 'updating' } else { 'up_to_date' }
         $ready = $state -eq 'up_to_date'
         $state = if ($ready) { 'UpToDate' } else { 'Updating' }
@@ -63,7 +67,7 @@ function Invoke-WebRequest {
     }
     if ($Method -eq 'POST') {
         if ($env:LOL_TEST_CASE -eq 'restore' -and -not $script:testValidated) { throw 'Launch bypassed validation after restoration' }
-        $target = Join-Path $PSScriptRoot 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client'
+        $target = Join-Path $PSScriptRoot "tw\Game\DATA\FINAL\Global.$Locale.wad.client"
         $bytes = [IO.File]::ReadAllText($target)
         if ($env:LOL_TEST_CASE -eq 'updating' -and $script:patchPoll -eq 1) {
             if ($bytes -ne 'OLD!') { throw 'Resources were overwritten while patching' }
@@ -81,7 +85,7 @@ function Invoke-WebRequest {
 }
 '@
 try {
-    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore', 'traditional')) {
+    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore', 'traditional', 'restart')) {
         $root = Join-Path $testRoot $case
         foreach ($path in @('cn\Game\DATA\FINAL','tw\Game\DATA\FINAL',
             'cn\LeagueClient\Plugins\rcp-be-lol-game-data','cn\LeagueClient\Plugins\rcp-fe-lol-typekit',
@@ -105,7 +109,7 @@ try {
             [IO.File]::WriteAllText((Join-Path $root "cn\LeagueClient\Plugins\$plugin\zh_CN-assets.wad"), 'NEW!')
             [IO.File]::WriteAllText((Join-Path $root "tw\Plugins\$plugin\zh_CN-assets.wad"), 'OLD!')
         }
-        if ($case -in @('native','restore','traditional')) {
+        if ($case -in @('native','restore','traditional','restart')) {
             Get-ChildItem -LiteralPath (Join-Path $root 'cn\Game\DATA\FINAL') -File |
                 Copy-Item -Destination (Join-Path $root 'tw\Game\DATA\FINAL') -Force
             foreach ($plugin in @('rcp-be-lol-game-data', 'rcp-fe-lol-typekit')) {
@@ -133,7 +137,7 @@ try {
         Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Resource-Backup.ps1') -Destination (Join-Path $root 'Resource-Backup.ps1')
         Set-Content -LiteralPath $fixturePath -Value $fixture -Encoding utf8
         $env:LOL_TEST_CASE = $case
-        $mode = if ($case -in @('native','restore','traditional')) { 'Riot' } else { 'Local' }
+        $mode = if ($case -in @('native','restore','traditional','restart')) { 'Riot' } else { 'Local' }
         $testLocale = if ($case -eq 'traditional') { 'zh_TW' } else { 'zh_CN' }
         $output = & $pwsh -NoProfile -File $fixturePath -ResourceSource $mode -Locale $testLocale 2>&1
         $exitCode = $LASTEXITCODE
@@ -143,6 +147,7 @@ try {
                 throw 'Mismatch modified game resources'
             }
         } elseif ($exitCode -ne 0 -or "$output" -notmatch "已以 $testLocale 启动") { throw "Scenario $case failed: $output" }
+        if ($case -eq 'restart' -and "$output" -notmatch '正在重新连接后台') { throw 'Restart scenario did not exercise reconnection' }
         Write-Output "PASS $case"
     }
 } finally {
