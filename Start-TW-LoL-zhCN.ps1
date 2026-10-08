@@ -184,6 +184,9 @@ try {
     $patchQueued = $false
     do {
         try {
+            if (Get-Process -Name 'League of Legends','LeagueClient' -ErrorAction SilentlyContinue) {
+                throw 'League 客户端或对局已打开，停止此次语言设置；请关闭客户端后重试'
+            }
             $connection = Get-RiotConnection
             $current = (Invoke-Riot $connection 'GET' $localePath).Content | ConvertFrom-Json
             if ($current -ne 'zh_CN') { $null = Invoke-Riot $connection 'PUT' $localePath '"zh_CN"'; $resourcesReady = $false }

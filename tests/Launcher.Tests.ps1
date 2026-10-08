@@ -101,6 +101,7 @@ try {
         @{ cnRoot=(Join-Path $root 'cn'); twRoot=(Join-Path $root 'tw'); riotClientExe=(Join-Path $root 'riot.exe') } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'config.local.json') -Encoding utf8
         $fixture = $source.Insert($ast.ParamBlock.Extent.EndOffset, "`n$mocks`n")
+        $fixture = $fixture.Replace("'Local\LOL_TWtoCN_Launcher'", "'Local\LOL_TWtoCN_Test_$([guid]::NewGuid())'")
         $fixturePath = Join-Path $root 'launcher.ps1'
         Set-Content -LiteralPath $fixturePath -Value $fixture -Encoding utf8
         $env:LOL_TEST_CASE = $case
