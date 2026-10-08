@@ -1,37 +1,63 @@
 # 台服 LOL 简中启动项目
 
-在 Windows 上使用**已安装的国服 `zh_CN` 资源**启动台服《英雄联盟》。游戏资源和 Riot 凭据均不包含在仓库中。
+在 Windows 上以精确 **`zh_CN`** 语言启动台服《英雄联盟》。默认由 Riot 下载和管理当前台服补丁的官方简中游戏、语音及客户端资源，无需国服处于相同补丁。
 
-## 准备
+游戏资源、Riot 凭据及本机配置均不包含在仓库中。
 
-1. 安装并更新国服及台服《英雄联盟》，两端须处于同一补丁版本，例如都是 `16.19`。脚本会拒绝混用不同补丁的资源。
-2. 安装 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)、Riot Client。简中资源必须来自新设备上的国服安装目录。
+## 准备与安装
 
-## 在新设备安装
-
-在此项目目录打开 PowerShell 7，根据实际安装路径运行：
+安装台服《英雄联盟》、Riot Client，以及 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)。在项目目录打开 PowerShell 7，根据实际路径运行：
 
 ```powershell
 pwsh -NoProfile -File .\Install.ps1 `
-  -CnRoot 'D:\WeGameApps\英雄联盟' `
   -TwRoot 'D:\Riot Games\League of Legends\League of Legends' `
   -RiotClientExe 'C:\Riot Games\Riot Client\RiotClientServices.exe'
 ```
 
-安装器会检查游戏目录，生成被 Git 忽略的 `config.local.json`，并创建桌面入口 **台服 LOL 简体中文**。今后通过此入口启动。若 Riot 已打开但 League 客户端尚未打开，也可使用此入口。若 League 客户端已打开，请先关闭它。
+安装器保存被 Git 忽略的 `config.local.json`，并创建桌面入口 **台服 LOL 简体中文**。使用此入口启动；若 League 客户端或对局已打开，请先正常关闭客户端。
 
-只检查资源和版本，不启动游戏：
+旧版项目更新后，重新运行安装脚本即可更新快捷方式；已有配置中的 `cnRoot` 可以保留，默认模式不读取国服资源。
+
+只检查安装和现有资源，不启动或下载：
 
 ```powershell
 pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -CheckOnly
 ```
 
-## 工作方式与限制
+此检查通过只表示安装路径及版本元数据可读取，不代表简中下载已经完成。
 
-- Riot 客户端启动时可能把台服产品设置 YAML 中的语言改回 `zh_TW`。桌面入口会在每次启动前调用 Riot 本地接口重新设为 `zh_CN`，再复制本机国服的简中游戏及客户端资源，然后启动台服游戏。不要依赖手工修改 YAML 的持久性。
-- 启动器会在 Riot 本地接口刚可用时就指定 `zh_CN`，并在游戏启动前再次确认。语言切换过晚可能使 Riot 把简中资源判为额外文件，反复进行资源修复。真正的游戏补丁更新仍会正常下载。
-- Riot 更新可能改变本地接口、安装布局或资源格式。若脚本报错，先更新两端游戏，再运行 `-CheckOnly`；必要时更新本项目。
-- 运行日志仅保存在 `%LOCALAPPDATA%\LOL_TWtoCN\launcher.log`。本机路径配置与日志不进入 Git。
-- 未将国服资源包上传 GitHub。新设备须自行安装国服并保持版本匹配。
+## 工作方式
+
+- 启动时通过 Riot 本地接口指定 `zh_CN`，在启动游戏前再次确认。Riot 可能改写产品 YAML，不依赖手工修改 YAML 的持久性。
+- 使用 Riot 的 v2 完整更新状态，覆盖游戏及客户端；等待更新完成后，确认简中资源存在，再启动 League 客户端。v1 状态可能显示客户端已更新，但游戏仍在下载。
+- 默认由 Riot 下载官方当前补丁的简中资源，不向台服复制较旧的国服文件，也不在更新期间反复写入资源。
+- 首次切换或补丁更新可能需要下载数 GB；所需流量以 Riot 状态为准。真正的补丁下载不会被跳过。使用其他入口改回语言后，也可能再次下载资源。
+- 更新默认最多等待 120 分钟；网络较慢时可使用 `-WaitMinutes 1440` 延长。重复点击只允许一个启动器运行。桌面入口失败时显示原因；Riot 接受请求后还会确认 League 客户端已打开。
+- 日志保存在 `%LOCALAPPDATA%\LOL_TWtoCN\launcher.log`，不进入 Git。
+
+## 可选：使用已安装的国服资源
+
+保留旧的本地复制方式，需要安装配置中设置 `cnRoot`，且两端程序及资源必须为相同补丁：
+
+```powershell
+pwsh -NoProfile -File .\Install.ps1 `
+  -CnRoot 'D:\WeGameApps\英雄联盟' `
+  -TwRoot 'D:\Riot Games\League of Legends\League of Legends'
+
+pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -ResourceSource Local -CheckOnly
+pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -ResourceSource Local -ShowErrors
+```
+
+两服均显示“更新完成”不代表补丁相同。本地模式核对程序及 `Game\content-metadata.json`，复制时比较内容摘要，避免同大小的新资源被跳过。桌面入口默认仍使用 Riot 模式。
+
+## 验证
+
+```powershell
+pwsh -NoProfile -File .\tests\Launcher.Tests.ps1
+```
+
+隔离测试覆盖版本不匹配保护、同大小资源更新、等待补丁完成后再写入，以及官方模式不读取较旧国服资源。测试不访问 Riot、不修改已安装游戏文件。
+
+Riot 更新可能改变接口或资源布局。错误提示及日志可用于定位问题；官方模式未验证完成时不会报告简中启动成功。
 
 本项目为个人配置脚本，与 Riot Games 或腾讯均无关联。

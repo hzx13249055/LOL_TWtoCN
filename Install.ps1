@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)][string]$CnRoot,
+    [string]$CnRoot,
     [Parameter(Mandatory = $true)][string]$TwRoot,
     [string]$RiotClientExe = 'C:\Riot Games\Riot Client\RiotClientServices.exe',
     [string]$ShortcutPath = (Join-Path ([Environment]::GetFolderPath('Desktop')) '台服 LOL 简体中文.lnk')
@@ -9,15 +9,12 @@ $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw '请使用 PowerShell 7 (pwsh) 运行安装脚本。' }
 
 $pwsh = (Get-Process -Id $PID -ErrorAction Stop).Path
-$cn = (Resolve-Path -LiteralPath $CnRoot -ErrorAction Stop).Path.TrimEnd('\')
+$cn = if ($CnRoot) { (Resolve-Path -LiteralPath $CnRoot -ErrorAction Stop).Path.TrimEnd('\') } else { $null }
 $tw = (Resolve-Path -LiteralPath $TwRoot -ErrorAction Stop).Path.TrimEnd('\')
 $riot = (Resolve-Path -LiteralPath $RiotClientExe -ErrorAction Stop).Path
 $launcher = Join-Path $PSScriptRoot 'Start-TW-LoL-zhCN.ps1'
 
 foreach ($path in @(
-    (Join-Path $cn 'Game\League of Legends.exe'),
-    (Join-Path $cn 'Game\DATA\FINAL'),
-    (Join-Path $cn 'LeagueClient\Plugins'),
     (Join-Path $tw 'LeagueClient.exe'),
     (Join-Path $tw 'Game\League of Legends.exe'),
     (Join-Path $tw 'Game\DATA\FINAL'),
@@ -37,7 +34,7 @@ $config | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $configPath -Encodi
 
 $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($ShortcutPath)
 $shortcut.TargetPath = $pwsh
-$shortcut.Arguments = '-NoProfile -File "' + $launcher + '"'
+$shortcut.Arguments = '-NoProfile -File "' + $launcher + '" -ShowErrors'
 $shortcut.WorkingDirectory = $PSScriptRoot
 $shortcut.IconLocation = (Join-Path $tw 'LeagueClient.exe') + ',0'
 $shortcut.Description = '使用 zh_CN 资源启动台服英雄联盟'

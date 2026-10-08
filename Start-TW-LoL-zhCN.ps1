@@ -1,10 +1,17 @@
-param([switch]$CheckOnly)
+param(
+    [switch]$CheckOnly,
+    [switch]$ShowErrors,
+    [ValidateSet('Riot', 'Local')][string]$ResourceSource = 'Riot',
+    [ValidateRange(1, 1440)][int]$WaitMinutes = 120
+)
 
 $ErrorActionPreference = 'Stop'
 $configPath = Join-Path $PSScriptRoot 'config.local.json'
 $localePath = '/riotclient/product-locales/products/league_of_legends/patchlines/live'
 $logDir = Join-Path $env:LOCALAPPDATA 'LOL_TWtoCN'
 $logPath = Join-Path $logDir 'launcher.log'
+$mutex = $null
+$ownsMutex = $false
 
 function Write-Status([string]$message) {
     if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
@@ -36,6 +43,7 @@ function Invoke-Riot([hashtable]$connection, [string]$method, [string]$path, [st
         Method = $method
         Headers = @{ Authorization = $connection.Authorization }
         SkipCertificateCheck = $true
+        NoProxy = $true
         TimeoutSec = $timeoutSec
         ErrorAction = 'Stop'
     }
@@ -46,40 +54,94 @@ function Invoke-Riot([hashtable]$connection, [string]$method, [string]$path, [st
     return Invoke-WebRequest @args
 }
 
+function Get-GamePatch([string]$root) {
+    $exeVersion = (Get-Item -LiteralPath (Join-Path $root 'Game\League of Legends.exe') -ErrorAction Stop).VersionInfo.FileVersion
+    $exePatch = ($exeVersion -split '\.')[0..1] -join '.'
+    $metadata = Join-Path $root 'Game\content-metadata.json'
+    if (Test-Path -LiteralPath $metadata) {
+        $contentVersion = (Get-Content -LiteralPath $metadata -Raw -Encoding utf8 | ConvertFrom-Json).version
+        if ($contentVersion -notmatch '^(\d+\.\d+)\.') { throw "游戏资源版本无效：$metadata" }
+        if ($Matches[1] -ne $exePatch) { throw "此安装仍有未完成的更新：$root（程序 $exePatch，资源 $($Matches[1])）" }
+    }
+    return $exePatch
+}
+
+function Assert-MatchingPatches {
+    $script:cnPatch = Get-GamePatch $cnRoot
+    $script:twPatch = Get-GamePatch $twRoot
+    if ($cnPatch -ne $twPatch) {
+        throw "实际补丁不匹配：国服 $cnPatch（$cnRoot），台服 $twPatch（$twRoot）。两服均显示更新完成，也可能仍处于不同补丁；需要同补丁的国服 zh_CN 资源。"
+    }
+}
+
+function Copy-Resource([string]$source, [string]$destination) {
+    $sourceItem = Get-Item -LiteralPath $source -ErrorAction Stop
+    $existing = Get-Item -LiteralPath $destination -ErrorAction SilentlyContinue
+    # Equal size does not prove the two patches contain the same resource.
+    if ($null -ne $existing -and $existing.Length -eq $sourceItem.Length -and
+        (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -eq
+        (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash) { return $false }
+    $parent = Split-Path -Path $destination -Parent
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    Copy-Item -LiteralPath $source -Destination $destination -Force -ErrorAction Stop
+    return $true
+}
+
+function Sync-Resources {
+    Assert-MatchingPatches
+    if (Get-Process -Name 'League of Legends','LeagueClient' -ErrorAction SilentlyContinue) {
+        throw 'League 客户端或对局已打开，请关闭客户端后再使用简中入口'
+    }
+    $copied = 0
+    foreach ($file in $files) {
+        $relative = $file.FullName.Substring($cnGame.Length + 1)
+        if (Copy-Resource $file.FullName (Join-Path $twGame $relative)) { $copied++ }
+    }
+    foreach ($relative in $pluginFiles) {
+        if (Copy-Resource (Join-Path $cnPlugins $relative) (Join-Path $twPlugins $relative)) { $copied++ }
+    }
+    Write-Status "简中资源就绪：$($files.Count) 个游戏文件和 $($pluginFiles.Count) 个客户端文件，本次复制 $copied 个"
+}
+
 try {
     if ($PSVersionTable.PSVersion.Major -lt 7) { throw '需要 PowerShell 7 (pwsh)' }
     $config = Get-Content -LiteralPath $configPath -Raw -Encoding utf8 | ConvertFrom-Json
-    $cnRoot = (Resolve-Path -LiteralPath $config.cnRoot -ErrorAction Stop).Path.TrimEnd('\')
     $twRoot = (Resolve-Path -LiteralPath $config.twRoot -ErrorAction Stop).Path.TrimEnd('\')
     $riotExe = (Resolve-Path -LiteralPath $config.riotClientExe -ErrorAction Stop).Path
-    $cnGame = Join-Path $cnRoot 'Game\DATA\FINAL'
     $twGame = Join-Path $twRoot 'Game\DATA\FINAL'
-    $cnPlugins = Join-Path $cnRoot 'LeagueClient\Plugins'
     $twPlugins = Join-Path $twRoot 'Plugins'
-
-    $cnVersion = (Get-Item -LiteralPath (Join-Path $cnRoot 'Game\League of Legends.exe') -ErrorAction Stop).VersionInfo.FileVersion
-    $twVersion = (Get-Item -LiteralPath (Join-Path $twRoot 'Game\League of Legends.exe') -ErrorAction Stop).VersionInfo.FileVersion
-    $cnPatch = ($cnVersion -split '\.')[0..1] -join '.'
-    $twPatch = ($twVersion -split '\.')[0..1] -join '.'
-    if ($cnPatch -ne $twPatch) { throw "国服版本 $cnPatch 与台服版本 $twPatch 不匹配；请先更新两端" }
-
-    $files = @(Get-ChildItem -LiteralPath $cnGame -Recurse -File -Filter '*.zh_CN.wad.client')
-    if ($files.Count -lt 100 -or -not ($files | Where-Object Name -eq 'Global.zh_CN.wad.client')) {
-        throw "国服简中游戏资源不完整：仅找到 $($files.Count) 个文件"
-    }
     $pluginFiles = @('rcp-be-lol-game-data\zh_CN-assets.wad', 'rcp-fe-lol-typekit\zh_CN-assets.wad')
-    foreach ($relative in $pluginFiles) {
-        if (-not (Test-Path -LiteralPath (Join-Path $cnPlugins $relative))) {
-            throw "国服客户端资源缺失：$relative"
+    if ($ResourceSource -eq 'Local') {
+        $cnRoot = (Resolve-Path -LiteralPath $config.cnRoot -ErrorAction Stop).Path.TrimEnd('\')
+        $cnGame = Join-Path $cnRoot 'Game\DATA\FINAL'
+        $cnPlugins = Join-Path $cnRoot 'LeagueClient\Plugins'
+        Assert-MatchingPatches
+        $files = @(Get-ChildItem -LiteralPath $cnGame -Recurse -File -Filter '*.zh_CN.wad.client')
+        if ($files.Count -lt 100 -or -not ($files | Where-Object Name -eq 'Global.zh_CN.wad.client')) {
+            throw "国服简中游戏资源不完整：仅找到 $($files.Count) 个文件"
         }
+        foreach ($relative in $pluginFiles) {
+            if (-not (Test-Path -LiteralPath (Join-Path $cnPlugins $relative))) { throw "国服客户端资源缺失：$relative" }
+        }
+    } else {
+        $twPatch = Get-GamePatch $twRoot
     }
     if ($CheckOnly) {
-        Write-Output "检查通过：两端均为 $cnPatch；找到 $($files.Count) 个简中游戏资源和 $($pluginFiles.Count) 个客户端资源。"
+        if ($ResourceSource -eq 'Local') {
+            Write-Output "本地资源检查通过：两端均为 $cnPatch；找到 $($files.Count) 个简中游戏资源和 $($pluginFiles.Count) 个客户端资源。"
+        } else {
+            $installed = @(Get-ChildItem -LiteralPath $twGame -Recurse -File -Filter '*.zh_CN.wad.client')
+            Write-Output "台服 $twPatch；使用 Riot 官方同补丁 zh_CN 资源，不依赖国服版本。当前已有 $($installed.Count) 个游戏语言文件。此检查不启动或下载资源。"
+        }
         exit 0
     }
 
     if (Get-Process -Name 'League of Legends' -ErrorAction SilentlyContinue) { throw '对局正在运行，请勿切换语言' }
     if (Get-Process -Name 'LeagueClient' -ErrorAction SilentlyContinue) { throw '请先关闭已打开的 League 客户端' }
+
+    $mutex = [Threading.Mutex]::new($false, 'Local\LOL_TWtoCN_Launcher')
+    try { $ownsMutex = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
+    if (-not $ownsMutex) { throw '另一个简中启动器仍在运行，请等待它完成' }
 
     if (-not (Get-Process -Name 'RiotClientServices' -ErrorAction SilentlyContinue)) {
         Write-Status '正在启动 Riot 客户端'
@@ -116,68 +178,79 @@ try {
     if ($current -ne 'zh_CN') { throw "Riot 未接受 zh_CN；当前为 $current" }
     Write-Status '已将台服游戏语言设为 zh_CN'
 
-    $copied = 0
-    foreach ($file in $files) {
-        $relative = $file.FullName.Substring($cnGame.Length + 1)
-        $destination = Join-Path $twGame $relative
-        $parent = Split-Path -Path $destination -Parent
-        if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-        $existing = Get-Item -LiteralPath $destination -ErrorAction SilentlyContinue
-        if ($null -eq $existing -or $existing.Length -ne $file.Length) {
-            Copy-Item -LiteralPath $file.FullName -Destination $destination -Force -ErrorAction Stop
-            $copied++
-        }
-    }
-    foreach ($relative in $pluginFiles) {
-        $source = Join-Path $cnPlugins $relative
-        $destination = Join-Path $twPlugins $relative
-        $parent = Split-Path -Path $destination -Parent
-        if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-        $existing = Get-Item -LiteralPath $destination -ErrorAction SilentlyContinue
-        $sourceItem = Get-Item -LiteralPath $source -ErrorAction Stop
-        if ($null -eq $existing -or $existing.Length -ne $sourceItem.Length) {
-            Copy-Item -LiteralPath $source -Destination $destination -Force -ErrorAction Stop
-        }
-    }
-    Write-Status "简中资源就绪：$($files.Count) 个游戏文件，本次复制 $copied 个"
-
     $launched = $false
-    for ($attempt = 1; $attempt -le 12; $attempt++) {
+    $deadline = (Get-Date).AddMinutes($WaitMinutes)
+    $resourcesReady = $false
+    do {
         try {
-            $null = Invoke-Riot $connection 'PUT' $localePath '"zh_CN"'
+            $connection = Get-RiotConnection
+            $current = (Invoke-Riot $connection 'GET' $localePath).Content | ConvertFrom-Json
+            if ($current -ne 'zh_CN') { $null = Invoke-Riot $connection 'PUT' $localePath '"zh_CN"'; $resourcesReady = $false }
+            # v1 reports only one patchline. v2 covers game and client updates.
+            $patch = (Invoke-Riot $connection 'GET' '/patch-proxy/v2/patch-states/products/league_of_legends/patchlines/live').Content | ConvertFrom-Json
+            if ($null -ne $patch.error -or $patch.state -in @('Error','Failed')) {
+                throw "Riot 更新失败（$($patch.state)）；请查看 Riot 客户端中的更新错误后重试"
+            }
+            if ($patch.launchable -eq $true -and $patch.state -eq 'UpToDate') {
+                if (-not $resourcesReady) {
+                    if ($ResourceSource -eq 'Local') { Sync-Resources } else {
+                        $installed = @(Get-ChildItem -LiteralPath $twGame -Recurse -File -Filter '*.zh_CN.wad.client')
+                        if ($installed.Count -lt 100 -or -not ($installed | Where-Object Name -eq 'Global.zh_CN.wad.client')) {
+                            throw "Riot 更新已结束，但 zh_CN 游戏资源不完整：$($installed.Count) 个文件"
+                        }
+                        foreach ($relative in $pluginFiles) {
+                            if (-not (Test-Path -LiteralPath (Join-Path $twPlugins $relative))) { throw "Riot zh_CN 客户端资源缺失：$relative" }
+                        }
+                        Write-Status "Riot 官方简中资源就绪：$($installed.Count) 个游戏文件，无需复制国服资源"
+                    }
+                    $resourcesReady = $true
+                }
+            } else {
+                $resourcesReady = $false
+                # The product launch request lets Riot start pending updates.
+                # Do not write resources while its patcher is working.
+                $downloaded = [math]::Round($patch.progress.totalBytesDownloaded / 1MB)
+                $total = [math]::Round($patch.progress.totalBytesToDownload / 1MB)
+                Write-Status "Riot 正在检查或更新资源：$($patch.state)，已下载 $downloaded/$total MB，最多等待 $WaitMinutes 分钟"
+            }
             $null = Invoke-Riot $connection 'POST' '/product-launcher/v1/products/league_of_legends/patchlines/live' '{}' 30
-            $launched = $true
-            break
-        } catch {
+            if ($resourcesReady) { $launched = $true; break }
             if (Get-Process -Name 'LeagueClient' -ErrorAction SilentlyContinue) {
+                throw 'Riot 在简中资源准备好之前打开了客户端，请关闭 League 客户端后重试'
+            }
+        } catch {
+            if ($resourcesReady -and (Get-Process -Name 'LeagueClient' -ErrorAction SilentlyContinue)) {
                 $launched = $true
                 break
             }
             $status = 0
             if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
             $timedOut = $_.Exception.Message -match 'Timeout|timed out|超时'
-            if (($status -ne 423 -and $status -ne 424 -and -not $timedOut) -or $attempt -eq 12) { throw }
-            Write-Status "Riot 正在完成资源检查，稍后重试（$attempt/12）"
-            Start-Sleep -Seconds 10
-            foreach ($file in $files) {
-                $relative = $file.FullName.Substring($cnGame.Length + 1)
-                $destination = Join-Path $twGame $relative
-                if (-not (Test-Path -LiteralPath $destination)) {
-                    Copy-Item -LiteralPath $file.FullName -Destination $destination -ErrorAction Stop
-                }
-            }
-            foreach ($relative in $pluginFiles) {
-                $source = Join-Path $cnPlugins $relative
-                $destination = Join-Path $twPlugins $relative
-                if (-not (Test-Path -LiteralPath $destination)) {
-                    Copy-Item -LiteralPath $source -Destination $destination -ErrorAction Stop
-                }
-            }
+            if ($status -ne 423 -and $status -ne 424 -and -not $timedOut) { throw }
+            $resourcesReady = $false
+            Write-Status "Riot 尚未允许启动（$status），继续等待资源检查或更新"
         }
+        Start-Sleep -Seconds 10
+    } while ((Get-Date) -lt $deadline)
+    if (-not $launched) { throw "等待 Riot 更新或依赖检查超过 $WaitMinutes 分钟；请在 Riot 客户端检查更新、登录或 Vanguard 状态后重试" }
+    $clientDeadline = (Get-Date).AddSeconds(60)
+    while (-not (Get-Process -Name 'LeagueClient' -ErrorAction SilentlyContinue) -and (Get-Date) -lt $clientDeadline) {
+        Start-Sleep -Seconds 2
     }
-    if (-not $launched) { throw 'Riot 未接受游戏启动请求' }
+    if (-not (Get-Process -Name 'LeagueClient' -ErrorAction SilentlyContinue)) {
+        throw 'Riot 接受了请求，但 League 客户端未在一分钟内打开；请查看 Riot 客户端中的错误提示'
+    }
+    $current = (Invoke-Riot (Get-RiotConnection) 'GET' $localePath).Content | ConvertFrom-Json
+    if ($current -ne 'zh_CN') { throw "客户端已打开，但 Riot 语言变为 $current；简中启动未确认成功" }
     Write-Status '已以 zh_CN 启动台服英雄联盟'
 } catch {
-    Write-Status ('启动失败：' + $_.Exception.Message)
+    $failure = $_.Exception.Message
+    Write-Status ('启动失败：' + $failure)
+    if ($ShowErrors -and -not $CheckOnly) {
+        try { $null = (New-Object -ComObject WScript.Shell).Popup("$failure`n`n日志：$logPath", 0, '台服 LOL 简中启动失败', 16) } catch { }
+    }
     exit 1
+} finally {
+    if ($ownsMutex) { $mutex.ReleaseMutex() }
+    if ($null -ne $mutex) { $mutex.Dispose() }
 }
