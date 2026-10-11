@@ -14,7 +14,17 @@ function Read-VanguardLogState([string]$Path) {
     $ready = $successes.Count -gt 0 -and ($disconnects.Count -eq 0 -or $successes[-1].Index -gt $disconnects[-1].Index)
     $healthyAt = if ($ready) { $launchAt.AddSeconds([double]::Parse($successes[-1].Groups['offset'].Value, [Globalization.CultureInfo]::InvariantCulture)) } else { $null }
     $errorCode = if (-not $ready -and $disconnects.Count -gt 0) { [int]$disconnects[-1].Groups['code'].Value } else { $null }
-    return [pscustomobject]@{LaunchAt=$launchAt;Last216At=$last216At;HealthyAt=$healthyAt;Ready=$ready;ErrorCode=$errorCode}
+    $loginFailures = [regex]::Matches($text, '(?m)^\d+(?:\.\d+)?\|[^\r\n]*rcp-be-lol-login\|[^\r\n]*(?<reason>SUMMONER_FAILURE|Login auth faild with gaps)[^\r\n]*')
+    $loginCompletions = [regex]::Matches($text, '(?m)^\d+(?:\.\d+)?\|[^\r\n]*rcp-be-lol-login\|\s*Login complete\.')
+    $loginFailure = $null
+    if ($loginFailures.Count -gt 0 -and ($loginCompletions.Count -eq 0 -or $loginFailures[-1].Index -gt $loginCompletions[-1].Index)) {
+        if ($loginFailures[-1].Groups['reason'].Value -eq 'SUMMONER_FAILURE') {
+            $loginFailure = if ($text -match '<title>Attention Required! \| Cloudflare</title>') {
+                '台服账号资料请求被 Cloudflare 拒绝，客户端登录失败；请检查雷神台服线路后重试'
+            } else { '台服账号资料读取失败（SUMMONER_FAILURE）；请检查客户端和台服线路后重试' }
+        } else { $loginFailure = '台服登录队列认证失败；请检查 Riot 登录会话和台服线路后重试' }
+    }
+    return [pscustomobject]@{LaunchAt=$launchAt;Last216At=$last216At;HealthyAt=$healthyAt;Ready=$ready;ErrorCode=$errorCode;LoginFailure=$loginFailure}
 }
 
 function Get-VanguardCooldown([string]$GameRoot, [datetime]$Now = [datetime]::Now) {
@@ -52,6 +62,7 @@ function Wait-VanguardLogin([string]$GameRoot, [int]$ClientId, [int]$TimeoutSeco
             if ($state.ErrorCode -eq 216) { Assert-VanguardCooldown $GameRoot }
             throw "Vanguard 返回 VAN $($state.ErrorCode)，客户端未通过反作弊登录；请处理客户端提示后再启动"
         }
+        if ($state.LoginFailure) { throw $state.LoginFailure }
         if (-not (Get-Process -Name LeagueClient -ErrorAction SilentlyContinue | Where-Object Id -eq $ClientId)) {
             throw 'League 客户端已退出，尚未确认 Vanguard 登录成功'
         }

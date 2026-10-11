@@ -78,6 +78,27 @@ function Prepare-SimplifiedPatch {
 
 function Prepare-OfflineCache {
     if (Get-Process -Name 'League of Legends','LeagueClient' -ErrorAction SilentlyContinue) { throw '客户端或对局正在运行，取消资源准备' }
+    if ($ResourceSource -eq 'Riot') {
+        try {
+            $manifest = Read-ResourceBackup $twRoot $cacheRoot 'zh_CN'
+            $needsRestore = $false
+            if ($null -ne $manifest) {
+                foreach ($entry in $manifest.entries) {
+                    $path = Get-BackupEntryPath $twRoot $entry.path 'zh_CN'
+                    if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+                        (Get-Item -LiteralPath $path).Length -ne $entry.length -or
+                        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $entry.sha256) { $needsRestore = $true; break }
+                }
+            }
+            if (-not $needsRestore) {
+                Write-Status '现有资源无需从缓存恢复，保留 Riot 当前登录会话' | Out-Host
+                return
+            }
+        } catch {
+            Write-Status ('缓存清单不可用，保留 Riot 会话并使用官方更新：' + $_.Exception.Message) | Out-Host
+            return
+        }
+    }
     if (Get-Process -Name 'RiotClientServices' -ErrorAction SilentlyContinue) {
         $connection = Get-FullRiotConnection
         Write-Status '正在正常退出 Riot，离线复用简中缓存' | Out-Host
@@ -249,6 +270,8 @@ try {
     $deadline = (Get-Date).AddMinutes($WaitMinutes)
     $resourcesReady = $false
     $patchQueued = $true
+    $pausedResumes = 0
+    $loginWaitSince = $null
     $apiUnavailableSince = $null
     do {
         try {
@@ -291,6 +314,12 @@ try {
                 $downloaded = [math]::Round($patch.progress.totalBytesDownloaded / 1MB)
                 $total = [math]::Round($patch.progress.totalBytesToDownload / 1MB)
                 Write-Status "Riot 正在检查或更新资源：$($patch.state)，已下载 $downloaded/$total MB，最多等待 $WaitMinutes 分钟"
+                if ($patch.state -eq 'Paused') {
+                    $pausedResumes++
+                    if ($pausedResumes -gt 3) { throw 'Riot 更新任务连续暂停，自动恢复三次仍未完成；请检查 Riot 登录或更新提示后重试' }
+                    $null = Invoke-Riot $connection 'PUT' $patchRequestPath '{"locale":"zh_CN","createShortcut":false,"isRepair":false}'
+                    Write-Status "已恢复暂停的简中更新任务（$pausedResumes/3）"
+                }
                 # The explicit-language request is already queued. Do not
                 # launch while voice/client downloads are incomplete.
                 Start-Sleep -Seconds 10
@@ -299,6 +328,22 @@ try {
             if ($PrepareOnly -and $resourcesReady) {
                 Write-Status "已完成 $Locale 资源准备与官方校验；未启动游戏客户端"
                 exit 0
+            }
+            $authorizationReady = $false
+            try {
+                $auth = Invoke-Riot $connection 'GET' '/rso-auth/v1/authorization' $null 3
+                $authorizationReady = $auth.StatusCode -eq 200
+            } catch {
+                $authStatus = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+                if ($authStatus -notin @(0,401,403,404,503)) { throw }
+            }
+            $eligible = if ($authorizationReady) { (Invoke-Riot $connection 'GET' '/product-launcher/v1/products/league_of_legends/patchlines/live/eligibility').Content | ConvertFrom-Json } else { $false }
+            if (-not $authorizationReady -or $eligible -ne $true) {
+                if ($null -eq $loginWaitSince) { $loginWaitSince = Get-Date }
+                if (((Get-Date) - $loginWaitSince).TotalSeconds -ge 120) { throw '简中资源已就绪，但 Riot 登录会话或启动资格仍未就绪；请在 Riot 中完成登录后再使用入口' }
+                Write-Status '简中资源已就绪，等待 Riot 登录会话和启动资格；暂不启动游戏'
+                Start-Sleep -Seconds 5
+                continue
             }
             $launchRequested = $true
             $null = Invoke-Riot $connection 'POST' '/product-launcher/v1/products/league_of_legends/patchlines/live' '{}' 30

@@ -51,10 +51,19 @@ function Start-Sleep {
 function Invoke-WebRequest {
     param($Uri, $Method, $Headers, $SkipCertificateCheck, $NoProxy, $TimeoutSec, $ContentType, $Body)
     if ($Uri -like '*riot-client-lifecycle/v1/quit') {
+        if ($env:LOL_TEST_CASE -eq 'warm-session') { throw 'Unnecessarily quit a valid Riot session with matching cached resources' }
         $script:riotRunning = $false
         return [pscustomobject]@{ Content = '{}'; StatusCode = 204 }
     }
     if ($Uri -like '*session-patch-lock*') { throw 'Simplified launcher accessed the removed patch lock' }
+    if ($Uri -like '*rso-auth/v1/authorization') {
+        $script:authPoll++
+        if ($env:LOL_TEST_CASE -eq 'auth-wait' -and $script:authPoll -eq 1) {
+            $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::Unauthorized)
+            throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('Mock login not ready', $response)
+        }
+        return [pscustomobject]@{Content='{}';StatusCode=200}
+    }
     if ($Uri -like '*patch-jobs*' -and $Method -eq 'DELETE') {
         if ($env:LOL_TEST_CASE -eq 'initializing' -and -not $script:initializingRetried) {
             $script:initializingRetried = $true
@@ -81,6 +90,7 @@ function Invoke-WebRequest {
         $ready = $state -eq 'up_to_date'
         $state = if ($ready) { 'UpToDate' } else { 'Updating' }
         if ($env:LOL_TEST_CASE -eq 'partial' -and $script:patchPoll -eq 1) { $state = 'Paused'; $ready = $true }
+        if ($env:LOL_TEST_CASE -eq 'stalled') { $state = 'Paused'; $ready = $false }
         return [pscustomobject]@{ Content = (@{ state=$state; launchable=$ready; progress=@{totalBytesDownloaded=1;totalBytesToDownload=4} } | ConvertTo-Json); StatusCode = 200 }
     }
     if ($Uri -like '*priority-patch*') {
@@ -92,6 +102,7 @@ function Invoke-WebRequest {
         return [pscustomobject]@{ Content = '[]'; StatusCode = 201 }
     }
     if ($Method -eq 'POST') {
+        if ($env:LOL_TEST_CASE -eq 'auth-wait' -and $script:authPoll -lt 2) { throw 'Launched before Riot authorization became ready' }
         $script:launchRequests++
         if ($script:launchRequests -gt 1) { throw 'Duplicate game launch request' }
         if ($env:LOL_TEST_CASE -eq 'prepare') { throw 'PrepareOnly attempted game launch' }
@@ -125,7 +136,7 @@ function Invoke-WebRequest {
 }
 '@
 try {
-    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore', 'restart', 'background', 'background-transition', 'vanguard216','repair','prepare','cold','initializing','delayed')) {
+    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore', 'restart', 'background', 'background-transition', 'vanguard216','repair','prepare','cold','initializing','delayed','warm-session','auth-wait','stalled')) {
         $root = Join-Path $testRoot $case
         foreach ($path in @('cn\Game\DATA\FINAL','tw\Game\DATA\FINAL',
             'cn\LeagueClient\Plugins\rcp-be-lol-game-data','cn\LeagueClient\Plugins\rcp-fe-lol-typekit',
@@ -149,7 +160,7 @@ try {
             [IO.File]::WriteAllText((Join-Path $root "cn\LeagueClient\Plugins\$plugin\zh_CN-assets.wad"), 'NEW!')
             [IO.File]::WriteAllText((Join-Path $root "tw\Plugins\$plugin\zh_CN-assets.wad"), 'OLD!')
         }
-        if ($case -in @('native','restore','restart','background','background-transition','vanguard216','repair','prepare','cold','initializing','delayed')) {
+        if ($case -in @('native','restore','restart','background','background-transition','vanguard216','repair','prepare','cold','initializing','delayed','warm-session','auth-wait','stalled')) {
             Get-ChildItem -LiteralPath (Join-Path $root 'cn\Game\DATA\FINAL') -File |
                 Copy-Item -Destination (Join-Path $root 'tw\Game\DATA\FINAL') -Force
             foreach ($plugin in @('rcp-be-lol-game-data', 'rcp-fe-lol-typekit')) {
@@ -161,6 +172,7 @@ try {
             if ($case -eq 'repair') { [IO.File]::WriteAllText((Join-Path $root 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client'), 'BAD!') } else { Remove-Item -LiteralPath (Join-Path $root 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client') }
             Remove-Item -LiteralPath (Join-Path $root 'tw\Game\DATA\FINAL\test1.zh_CN.wad.client')
         }
+        if ($case -eq 'warm-session') { $null = Save-ResourceBackup (Join-Path $root 'tw') (Join-Path $root 'cache') }
         $metadataPath = Join-Path $root 'product_settings.yaml'
         @('locale_data:', '    available_locales:', '    - "zh_TW"', '    default_locale: "zh_TW"',
           ('product_install_full_path: "' + (Join-Path $root 'tw').Replace('\','/') + '"'),
@@ -175,7 +187,7 @@ try {
         Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Vanguard-Status.ps1') -Destination (Join-Path $root 'Vanguard-Status.ps1')
         Set-Content -LiteralPath $fixturePath -Value $fixture -Encoding utf8
         $env:LOL_TEST_CASE = $case
-        $mode = if ($case -in @('native','restore','restart','background','background-transition','vanguard216','repair','prepare','cold','initializing','delayed')) { 'Riot' } else { 'Local' }
+        $mode = if ($case -in @('native','restore','restart','background','background-transition','vanguard216','repair','prepare','cold','initializing','delayed','warm-session','auth-wait','stalled')) { 'Riot' } else { 'Local' }
         $testLocale = 'zh_CN'
         $extra = @()
         if ($case -eq 'prepare') { $extra = @('-PrepareOnly') }
@@ -188,10 +200,14 @@ try {
             }
         } elseif ($case -eq 'prepare') {
             if ($exitCode -ne 0 -or "$output" -notmatch '未启动游戏客户端') { throw "PrepareOnly failed: $output" }
+        } elseif ($case -eq 'stalled') {
+            if ($exitCode -ne 1 -or "$output" -notmatch '自动恢复三次') { throw "Paused task retried without a bound: $output" }
         } elseif ($case -eq 'vanguard216') {
             if ($exitCode -ne 1 -or "$output" -notmatch 'VAN 216' -or "$output" -match "已以 $testLocale 启动") { throw "Vanguard failure was reported as success: $output" }
         } elseif ($exitCode -ne 0 -or "$output" -notmatch "已以 $testLocale 启动") { throw "Scenario $case failed: $output" }
         if ($case -eq 'restart' -and "$output" -notmatch '正在重新连接后台') { throw 'Restart scenario did not exercise reconnection' }
+        if ($case -eq 'auth-wait' -and "$output" -notmatch '等待 Riot 登录会话') { throw 'Auth readiness scenario did not wait' }
+        if ($case -eq 'partial' -and "$output" -notmatch '已恢复暂停') { throw 'Paused state was not resumed' }
         if ($case -in @('background','background-transition') -and "$output" -notmatch '等待本地语言接口') { throw 'Background scenario did not wake full Riot mode' }
         Write-Output "PASS $case"
     }

@@ -37,6 +37,17 @@ try {
     try { $null = Wait-VanguardLogin $testRoot 3 -TimeoutSeconds 0 -AllowPendingLogin } catch { $rejected = $_.Exception.Message -match 'VAN 152' }
     if (-not $rejected) { throw 'Pending-login allowance hid a Vanguard error' }
     Write-Output 'PASS pending login without hiding Vanguard errors'
+    [IO.File]::WriteAllText($pending, "000009.780| ALWAYS| rcp-be-lol-login| Login complete.`n000009.966| ERROR| rcp-be-lol-login| SUMMONER_FAILURE - Failed to retreive summoner details`n<title>Attention Required! | Cloudflare</title>")
+    $rejected = $false
+    try { $null = Wait-VanguardLogin $testRoot 3 -TimeoutSeconds 0 -AllowPendingLogin } catch { $rejected = $_.Exception.Message -match 'Cloudflare' }
+    if (-not $rejected) { throw 'Pending-login allowance hid a Cloudflare profile failure' }
+    [IO.File]::AppendAllText($pending, "`n000020.000| ALWAYS| rcp-be-lol-login| Login complete.")
+    if ((Wait-VanguardLogin $testRoot 3 -TimeoutSeconds 0 -AllowPendingLogin) -ne $false) { throw 'Recovered login was not recognized as pending Vanguard' }
+    [IO.File]::WriteAllText($pending, '000009.000| ERROR| rcp-be-lol-login| Login auth faild with gaps')
+    $rejected = $false
+    try { $null = Wait-VanguardLogin $testRoot 3 -TimeoutSeconds 0 -AllowPendingLogin } catch { $rejected = $_.Exception.Message -match '登录队列认证失败' }
+    if (-not $rejected) { throw 'Pending-login allowance hid a queue authorization failure' }
+    Write-Output 'PASS backend login failure and later recovery'
 } finally {
     $resolvedRoot = (Resolve-Path -LiteralPath $testRoot).Path
     if ($resolvedRoot.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase)) {
