@@ -130,8 +130,8 @@ function Restore-ResourceBackup([string]$GameRoot, [string]$CacheRoot, [Validate
         $temporary = $destination + '.' + [guid]::NewGuid() + '.partial'
         try {
             [IO.File]::Copy($object, $temporary, $false)
-            # RepairExisting is only used while the caller holds Riot's exclusive
-            # session patch lock and has confirmed the old patch job is idle.
+            # RepairExisting requires the caller to keep Riot fully stopped.
+            # The single-language launcher never repairs files during patching.
             [IO.File]::Move($temporary, $destination, [bool]$RepairExisting)
         } finally {
             if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }

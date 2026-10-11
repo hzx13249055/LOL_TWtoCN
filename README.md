@@ -1,114 +1,87 @@
-# 台服 LOL 简中 / 繁中启动项目
+# 台服 LOL 简中启动项目
 
-在 Windows 上分别以精确 **`zh_CN`**（简中）或 **`zh_TW`**（繁中）启动台服《英雄联盟》。默认由 Riot 下载和管理当前台服补丁的官方游戏、语音及客户端资源，无需国服处于相同补丁。两种语言各自保留本地备份，切换时复用同版本资源。
+在 Windows 上使用精确 **`zh_CN`** 启动台服《英雄联盟》。默认使用 Riot 当前台服补丁的官方简中游戏、语音及客户端资源，不要求国服处于同一补丁。
 
-游戏资源、Riot 凭据及本机配置均不包含在仓库中。
+当前版本恢复为**简中单入口**，不再切换繁简语言，也不申请 Riot 的 session patch lock。旧版可能在 Riot 已打开时仍反复申请更新锁，返回 429 并卡住；本版本移除了这段流程。
 
-## 准备与安装
+## 安装与更新
 
-安装台服《英雄联盟》、Riot Client，以及 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)。在项目目录打开 PowerShell 7，根据实际路径运行：
-
-```powershell
-pwsh -NoProfile -File .\Install.ps1 `
-  -TwRoot 'D:\Riot Games\League of Legends\League of Legends' `
-  -RiotClientExe 'C:\Riot Games\Riot Client\RiotClientServices.exe'
-```
-
-安装器保存被 Git 忽略的 `config.local.json`，并创建两个桌面入口：**台服 LOL 简体中文**、**台服 LOL 繁体中文**。按所需语言选择入口；若 League 客户端或对局已打开，请先正常关闭客户端。
-
-旧版项目更新后，重新运行安装脚本即可更新快捷方式；如需保留可选国服路径，请再次传入 `-CnRoot`。默认模式不读取国服资源。
-
-只检查安装和现有资源，不启动或下载：
-
-```powershell
-pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -CheckOnly
-pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -Locale zh_TW -CheckOnly
-```
-
-此检查通过只表示安装路径及版本元数据可读取，不代表所选语言下载已经完成。脚本文件名为兼容旧入口保持不变，默认语言仍是 `zh_CN`。
-
-## 工作方式
-
-- 启动时通过 Riot 本地接口指定所选语言，在启动游戏前再次确认。Riot 可能改写产品 YAML，不依赖手工修改 YAML 的持久性。
-- 在本地更新接口出现时取得独占更新锁，取消旧任务并确认更新已停止，再恢复或修复同版本语言缓存。Riot 冷启动返回 `OutOfDate` 也表示尚未开始下载，入口会在锁保护下完成准备。
-- 更新请求本身明确传入 `locale: zh_CN` 或 `locale: zh_TW`。只设置产品语言不足以选择更新任务的语言，远端元数据可能重新指定繁中默认值；入口不再依赖改写 YAML。
-- 关闭 Riot 窗口后可能只剩精简后台，LOL 接口返回 404。启动器自动打开完整客户端并保护资源。后台重启后会重新取得更新锁和指定更新语言。
-- 使用 Riot 的 v2 完整更新状态，覆盖游戏及客户端；等待更新完成后，确认简中资源存在，再启动 League 客户端。v1 状态可能显示客户端已更新，但游戏仍在下载。
-- Riot 的“允许启动”可能早于语音下载完成。启动器单独请求更新，只有完整更新状态为 `UpToDate` 才启动客户端，避免提前启动暂停剩余语音下载。
-- 默认由 Riot 下载官方当前补丁的简中资源，不向台服复制较旧的国服文件，也不在更新期间反复写入资源。
-- 每种语言首次使用或补丁更新可能需要下载数 GB；所需流量以 Riot 状态为准。真正的补丁下载不会被跳过。
-- 请通过这两个入口切换语言。直接从 Riot Client 启动会绕过缓存准备，仍可能触发另一语言的完整下载。
-- 更新默认最多等待 120 分钟；网络较慢时可使用 `-WaitMinutes 1440` 延长。重复点击只允许一个启动器运行。桌面入口失败时显示原因；Riot 接受请求后还会确认 League 客户端已打开。
-- Riot 后台重启导致本地接口暂时返回 404 时，启动器最多等待一分钟并重新读取连接信息；接口持续不可用时会报告错误。
-- 日志保存在 `%LOCALAPPDATA%\LOL_TWtoCN\launcher.log`，不进入 Git。
-- 客户端打开后还会确认 Vanguard 登录成功，再报告启动成功；检测到反作弊断开或客户端退出时会显示原因。
-
-## 只准备资源，不启动游戏
-
-```powershell
-pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -PrepareOnly
-pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -Locale zh_TW -PrepareOnly
-```
-
-这会连接 Riot、恢复对应版本缓存并等待官方更新完成，可能下载真正缺少的资源；不会打开 League 客户端，不增加游戏启动次数，可用于排查重复下载。完成后仍通过对应桌面入口进入游戏。
-
-## Vanguard VAN 216
-
-[Riot 官方说明](https://support.riotgames.com/en-us/riot/performance/error-van-216/)：短时间多次启动可能触发 VAN 216，应停止点击开始，至少等待 30 分钟；提前再次尝试会重置等待时间。
-
-入口会从本机客户端日志识别 VAN 216，并在启动 Riot、修改配置或恢复资源之前显示可重试时间。仅点击被冷却检查阻止的本入口不会增加游戏启动次数；冷却期间请勿从 Riot 或其他入口点击开始。此检查不绕过 Vanguard，也不修改其配置。Vanguard 日志不上传 Git。
-
-## 自动本地备份
-
-官方模式在 Riot 完成更新后，自动备份所选语言的游戏文件及两个客户端资源。简中、繁中使用独立的版本清单。之后启动时，在更新锁保护下恢复**同一完整资源版本、同一语言**中缺失或损坏的文件，再提交明确指定语言的官方更新请求。现有文件的大小和 SHA-256 与备份一致时直接复用；损坏的缓存不能覆盖现有文件。对局或客户端运行期间不切换资源。
-
-两套语言备份独立维护，游戏安装目录作为当前所选语言的使用位置。为节省游戏盘空间，切换前会释放另一语言已备份的文件：必须同时验证原文件和独立备份的大小及 SHA-256，且版本一致，才允许释放。没有一致备份的文件保留。另一语言再次启动时可从缓存恢复，无需长期在游戏目录保留两份语言。
-
-默认备份目录为项目下的 `cache`，每种语言约需 4 GB 空间，两种语言请预留至少 8 GB，更新还需要额外空间。资源按 SHA-256 内容摘要保存，相同内容在不同版本间只存一份；旧版本清单保留，但不会跨版本恢复。损坏的备份文件不会恢复，交给 Riot 下载。备份失败会记录原因，不阻止正常游戏启动。旧版仅简中的缓存仍可读取。
-
-可在安装时指定有足够空间的本地目录，安装器会保留此前设置：
+安装台服 LOL、Riot Client 和 [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)，在项目目录运行：
 
 ```powershell
 pwsh -NoProfile -File .\Install.ps1 `
   -TwRoot 'D:\Riot Games\League of Legends\League of Legends' `
+  -RiotClientExe 'C:\Riot Games\Riot Client\RiotClientServices.exe' `
   -CacheRoot 'E:\LOL_TWtoCN_Cache'
 ```
 
-资源已经下载完成时，也可仅建立备份。此操作读取资源，不关闭或启动游戏；要求 Riot 正在运行、语言与参数一致且更新状态完整：
+安装器创建 **台服 LOL 简体中文** 桌面入口，并保存被 Git 忽略的 `config.local.json`。更新脚本后原简中快捷方式仍可使用。重新运行安装器会更新入口，并将旧繁中桌面快捷方式移到被 Git 忽略的 `local-backups`；已有繁中缓存保留。
+
+## 启动流程
+
+1. 检查客户端、对局及 Vanguard 启动频率限制。已有 League 客户端或对局时停止。
+2. Riot 已运行时，通过其正常退出接口退出；精简后台会先打开完整 Riot。Riot 无法正常退出时停止，不强制结束游戏或写入缓存。
+3. 在 Riot 完全退出后核对同版本简中缓存，恢复缺失或损坏的资源。匹配的文件直接复用；不删除另一语言的文件。
+4. 打开 Riot，通过本地接口固定 `zh_CN`，取消旧更新任务并提交明确带 `locale: zh_CN` 的更新请求。等待本地语言接口最多 45 秒，不访问旧更新锁接口，不依赖改写 YAML。
+5. 等待 Riot v2 状态为 `UpToDate`，确认简中资源完整，保存备份后启动客户端。启动请求回应较慢时等待本次结果，不重复提交；检查 Vanguard 已知错误，并尝试确认登录。账户尚未登录时显示待登录提示，不把客户端已打开误报为启动失败。
+
+补丁更新、缓存缺失或官方资源变化仍需由 Riot 下载。只有同一完整资源版本的缓存可以恢复；缓存不能跳过官方版本检查。通过 Riot 自身入口启动会绕过简中准备，可能再次选择繁中资源，请使用本项目的简中入口。
+
+日志保存在 `%LOCALAPPDATA%\LOL_TWtoCN\launcher.log`。接口等待会显示进度和限时错误；更新默认最多等待 120 分钟，可使用 `-WaitMinutes 1440` 延长。
+
+## 本地备份
+
+默认备份目录为项目下 `cache`，安装时可用 `-CacheRoot` 指定其它本地磁盘。简中约占 4 GB，更新还需要额外空间。资源按 SHA-256 保存，相同内容只存一份；版本由完整资源版本、程序版本及清单摘要识别。
+
+恢复在 Riot 退出后执行：校验缓存的大小与 SHA-256，只修复本版本简中资源。损坏的备份不会覆盖现有文件，交给 Riot 更新。官方更新完成后刷新备份，保留旧版本对象和清单。
+
+游戏资源、备份清单、Riot 凭据、本机路径配置、日志和快捷方式均不上传 Git。
+
+只检查安装和资源，不启动或下载：
+
+```powershell
+pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -CheckOnly
+```
+
+只准备简中缓存及官方更新，不启动 League 客户端：
+
+```powershell
+pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -PrepareOnly
+```
+
+Riot 已完成简中更新时只建立备份，不关闭或启动游戏：
 
 ```powershell
 pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -BackupOnly
-pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -Locale zh_TW -BackupOnly
 ```
 
-备份资源、版本清单、临时文件及本机路径配置均被 Git 忽略；仓库仅上传脚本、说明和测试。备份可减少缺失文件导致的重复下载，真正的版本变化仍须由 Riot 更新。不要把备份目录放进游戏安装目录。
+保留 `-Locale zh_CN` 参数以兼容旧简中快捷方式，`zh_TW` 不再受支持。
 
-## 可选：使用已安装的国服资源
+## Vanguard
 
-保留旧的本地复制方式，仅适用于 `zh_CN`，需要安装配置中设置 `cnRoot`，且两端程序及资源必须为相同补丁：
+入口保留 VAN 216 冷却检查和客户端错误检查。[Riot 官方说明](https://support.riotgames.com/en-us/riot/performance/error-van-216/)要求短时间频繁启动后至少等待 30 分钟；提前再次启动可能重置等待时间。被本入口的冷却检查阻止时不会启动游戏。`-PrepareOnly` 不启动 League，也不增加游戏启动次数。
+
+客户端打开后最多用 15 秒确认 Vanguard。明确的反作弊错误仍显示失败；账户或 Vanguard 尚未完成登录时显示待登录提示，不重复启动，也不声称反作弊验证已通过。完成账号登录由 Riot/League 自身处理。
+
+## 可选国服资源模式
+
+旧的国服本地复制模式仍可使用，需要设置 `cnRoot` 且两端程序和资源补丁一致：
 
 ```powershell
-pwsh -NoProfile -File .\Install.ps1 `
-  -CnRoot 'D:\WeGameApps\英雄联盟' `
-  -TwRoot 'D:\Riot Games\League of Legends\League of Legends'
-
 pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -ResourceSource Local -CheckOnly
 pwsh -NoProfile -File .\Start-TW-LoL-zhCN.ps1 -ResourceSource Local -ShowErrors
 ```
 
-两服均显示“更新完成”不代表补丁相同。本地模式核对程序及 `Game\content-metadata.json`，复制时比较内容摘要，避免同大小的新资源被跳过。桌面入口默认仍使用 Riot 模式。
+桌面入口默认使用 Riot 官方资源。国服补丁不一致时本地复制模式停止；同大小文件也会核对摘要。
 
 ## 验证
 
 ```powershell
 pwsh -NoProfile -File .\tests\Launcher.Tests.ps1
 pwsh -NoProfile -File .\tests\Resource-Backup.Tests.ps1
-pwsh -NoProfile -File .\tests\Product-Locale.Tests.ps1
 pwsh -NoProfile -File .\tests\Vanguard-Status.Tests.ps1
 ```
 
-隔离测试覆盖版本不匹配保护、同大小资源更新、完整更新后启动、缓存校验、语言隔离、安全释放、旧缓存兼容、后台重连，以及官方模式不读取较旧国服资源。测试不访问 Riot、不修改已安装游戏文件。
+隔离测试覆盖离线缓存恢复、官方简中请求、后台唤醒和重连、未更新完成时不启动、版本和摘要保护，以及 Vanguard 失败。测试禁止调用旧更新锁接口，不访问实际 Riot 或游戏目录。
 
-Riot 更新可能改变接口或资源布局。错误提示及日志可用于定位问题；官方模式未验证完成时不会报告所选语言启动成功。
-
-本项目为个人配置脚本，与 Riot Games 或腾讯均无关联。
+Riot 更新可能改变接口或资源布局；官方更新未完成时不启动客户端，Vanguard 未确认时明确提示待登录。本项目与 Riot Games 或腾讯无关联。

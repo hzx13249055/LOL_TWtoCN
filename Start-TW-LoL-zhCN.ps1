@@ -3,7 +3,7 @@ param(
     [switch]$ShowErrors,
     [switch]$BackupOnly,
     [switch]$PrepareOnly,
-    [ValidateSet('zh_CN','zh_TW')][string]$Locale = 'zh_CN',
+    [ValidateSet('zh_CN')][string]$Locale = 'zh_CN',
     [ValidateSet('Riot', 'Local')][string]$ResourceSource = 'Riot',
     [ValidateRange(1, 1440)][int]$WaitMinutes = 120
 )
@@ -20,8 +20,6 @@ $ownsMutex = $false
 
 $patchStatePath = '/patch-proxy/v2/patch-states/products/league_of_legends/patchlines/live'
 $patchRequestPath = '/patch-proxy/v2/priority-patch/products/league_of_legends/patchlines/live'
-$patchLockPath = '/patch-proxy/v2/session-patch-lock/products/league_of_legends/patchline/live'
-$patchLockConnection = $null
 
 function Save-VerifiedBackup {
     Write-Status "正在核对并保存本地 $Locale 备份：$cacheRoot"
@@ -29,99 +27,75 @@ function Save-VerifiedBackup {
     Write-Status "本地备份就绪：$($saved.FileCount) 个资源，新增 $($saved.AddedFiles) 个文件（$([math]::Round($saved.AddedBytes / 1MB)) MB）"
 }
 
-function Unlock-RiotPatch {
-    if ($null -ne $script:patchLockConnection) {
-        try { $null = Invoke-Riot $script:patchLockConnection 'DELETE' $patchLockPath } catch {
-            # A priority request can already remove the session lock.
-            if (-not $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 404) { throw }
-            $null = Invoke-Riot $script:patchLockConnection 'GET' $patchStatePath
-        }
-        $script:patchLockConnection = $null
-    }
-}
-
-function Get-ControlledRiotConnection {
+function Get-FullRiotConnection {
     $started = $false
-    $deadline = (Get-Date).AddSeconds(120)
+    $deadline = (Get-Date).AddSeconds(45)
+    $nextStatus = (Get-Date).AddSeconds(10)
     do {
         try {
             $connection = Get-RiotConnection
-            if ($null -ne $script:patchLockConnection -and $script:patchLockConnection.Base -eq $connection.Base) { return $connection }
-            # Take the exclusive lock before locale/eligibility calls can queue
-            # a patch using Riot's remote default (zh_TW).
-            $null = Invoke-Riot $connection 'PUT' $patchLockPath 'true' 3
-            $script:patchLockConnection = $connection
+            $null = Invoke-Riot $connection 'GET' $localePath $null 3
             return $connection
         } catch {
             $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-            if ($status -notin @(0,404,423,424,429,503)) { throw }
+            if ($status -notin @(0,404,423,424,503)) { throw }
             if (-not $started) {
-                Write-Status '正在启动完整 Riot 客户端；精简后台模式会自动唤醒' | Out-Host
+                Write-Status '正在打开 Riot 简中入口，等待本地语言接口（最多 45 秒）' | Out-Host
                 Start-Process -FilePath $riotExe -WindowStyle Hidden
                 $started = $true
             }
-            if ($status -eq 429) { Start-Sleep -Seconds 2 } else { Start-Sleep -Milliseconds 250 }
+            if ((Get-Date) -ge $nextStatus) {
+                Write-Status 'Riot 本地语言接口仍在初始化，继续等待' | Out-Host
+                $nextStatus = (Get-Date).AddSeconds(10)
+            }
+            Start-Sleep -Milliseconds 500
         }
     } while ((Get-Date) -lt $deadline)
-    throw 'Riot 未能在两分钟内准备好受保护的更新接口'
+    throw 'Riot 本地语言接口未在 45 秒内就绪，请检查 Riot 的登录或更新提示'
 }
 
-function Prepare-RequestedPatch([hashtable]$connection) {
-    if ($null -eq $script:patchLockConnection -or $script:patchLockConnection.Base -ne $connection.Base) {
-        throw '未持有 Riot 更新锁，取消资源恢复'
-    }
-    $null = Invoke-Riot $connection 'DELETE' '/patch-proxy/v2/patch-jobs/products/league_of_legends/patchlines/live'
-    $deadline = (Get-Date).AddSeconds(60)
-    do {
-        try { $state = (Invoke-Riot $connection 'GET' $patchStatePath).Content | ConvertFrom-Json } catch {
-            if (-not $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 404) { throw }
-            # Cold startup can have no patch state yet because our early lock
-            # prevented the default-language task from being created. Confirm
-            # the full product interface exists after cancellation succeeded.
-            $null = Invoke-Riot $connection 'GET' $localePath
-            $state = [pscustomobject]@{state='Paused'}
-        }
-        if ($state.state -in @('Paused','UpToDate','OutOfDate','NeedsRepair')) { break }
-        Start-Sleep -Milliseconds 250
-    } while ((Get-Date) -lt $deadline)
-    if ($state.state -notin @('Paused','UpToDate','OutOfDate','NeedsRepair')) { throw "Riot 更新任务未停止（$($state.state)），取消资源恢复" }
-    if (Get-Process -Name 'League of Legends','LeagueClient' -ErrorAction SilentlyContinue) { throw '检测到客户端或对局，取消资源切换' }
-    Write-Status '已锁定并暂停 Riot 更新任务，正在核对同版本语言缓存' | Out-Host
-    if ($ResourceSource -eq 'Riot') {
-        $otherLocale = if ($Locale -eq 'zh_CN') { 'zh_TW' } else { 'zh_CN' }
-        try {
-            $released = Release-BackedUpLanguage $twRoot $cacheRoot $otherLocale
-            if ($released.Released -gt 0) { Write-Status "已从游戏目录释放 $($released.Released) 个已备份的 $otherLocale 资源" | Out-Host }
-        } catch { Write-Status ('未释放另一语言资源：' + $_.Exception.Message) | Out-Host }
-        try {
-            $restored = Restore-ResourceBackup $twRoot $cacheRoot $Locale -RepairExisting
-            Write-Status "同版本 $Locale 缓存：恢复 $($restored.Restored) 个资源，拒绝 $($restored.Rejected) 个损坏资源" | Out-Host
-        } catch { Write-Status ('缓存不可用，交给 Riot 官方更新：' + $_.Exception.Message) | Out-Host }
-    }
-    $null = Invoke-Riot $connection 'PUT' $localePath $localeJson
-    # Product locale alone does not bind patch-job locale. Explicitly specify
-    # the language in the native request while the exclusive lock is held.
-    $request = @{locale=$Locale;createShortcut=$false;isRepair=$false} | ConvertTo-Json -Compress
-    $null = Invoke-Riot $connection 'PUT' $patchRequestPath $request
-    Unlock-RiotPatch
-    Write-Status "已提交明确指定 $Locale 的官方更新任务并释放更新锁" | Out-Host
-}
-
-function Prepare-ControlledPatch {
-    $deadline = (Get-Date).AddSeconds(120)
+function Prepare-SimplifiedPatch {
+    $deadline = (Get-Date).AddSeconds(45)
     do {
         try {
-            $connection = Get-ControlledRiotConnection
-            Prepare-RequestedPatch $connection
+            $connection = Get-FullRiotConnection
+            $null = Invoke-Riot $connection 'PUT' $localePath '"zh_CN"'
+            # Cancel an old default-language job without taking a session lock.
+            # No resource files are written while Riot is running.
+            $null = Invoke-Riot $connection 'DELETE' '/patch-proxy/v2/patch-jobs/products/league_of_legends/patchlines/live'
+            $null = Invoke-Riot $connection 'PUT' $patchRequestPath '{"locale":"zh_CN","createShortcut":false,"isRepair":false}'
+            Write-Status '已提交 zh_CN 官方更新请求（简中单入口）' | Out-Host
             return $connection
         } catch {
             $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-            if ($status -notin @(404,423,424,429,503)) { throw }
-            Write-Status 'Riot 更新接口正在初始化，保持资源保护并等待完整接口' | Out-Host
+            if ($status -notin @(0,404,423,424,503)) { throw }
+            Write-Status 'Riot 正在初始化更新接口，稍后重试简中请求' | Out-Host
             Start-Sleep -Seconds 2
         }
     } while ((Get-Date) -lt $deadline)
-    throw 'Riot 完整更新接口未能在两分钟内准备好'
+    throw 'Riot 未在 45 秒内接受简中更新请求，请查看客户端提示'
+}
+
+function Prepare-OfflineCache {
+    if (Get-Process -Name 'League of Legends','LeagueClient' -ErrorAction SilentlyContinue) { throw '客户端或对局正在运行，取消资源准备' }
+    if (Get-Process -Name 'RiotClientServices' -ErrorAction SilentlyContinue) {
+        $connection = Get-FullRiotConnection
+        Write-Status '正在正常退出 Riot，离线复用简中缓存' | Out-Host
+        try { $null = Invoke-Riot $connection 'POST' '/riot-client-lifecycle/v1/quit' } catch {
+            if (Get-Process -Name 'RiotClientServices' -ErrorAction SilentlyContinue) { throw }
+        }
+        $deadline = (Get-Date).AddSeconds(30)
+        while ((Get-Process -Name 'RiotClientServices' -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+        if (Get-Process -Name 'RiotClientServices' -ErrorAction SilentlyContinue) { throw 'Riot 未正常退出，取消缓存写入；请关闭 Riot 后重试' }
+    }
+    if (Get-Process -Name 'League of Legends','LeagueClient' -ErrorAction SilentlyContinue) { throw '客户端或对局正在运行，取消资源恢复' }
+    if ($ResourceSource -eq 'Riot') {
+        try {
+            Write-Status '正在核对同版本简中缓存' | Out-Host
+            $restored = Restore-ResourceBackup $twRoot $cacheRoot 'zh_CN' -RepairExisting
+            Write-Status "简中缓存：复用已匹配资源，恢复 $($restored.Restored) 个文件，拒绝 $($restored.Rejected) 个损坏备份" | Out-Host
+        } catch { Write-Status ('本地缓存不可用，交给 Riot 官方更新：' + $_.Exception.Message) | Out-Host }
+    }
 }
 
 function Write-Status([string]$message) {
@@ -216,9 +190,8 @@ function Sync-Resources {
 
 try {
     if ($PSVersionTable.PSVersion.Major -lt 7) { throw '需要 PowerShell 7 (pwsh)' }
-    $Locale = if ($Locale -ieq 'zh_CN') { 'zh_CN' } else { 'zh_TW' }
+    $Locale = 'zh_CN'
     $localeJson = '"' + $Locale + '"'
-    if ($ResourceSource -eq 'Local' -and $Locale -ne 'zh_CN') { throw '国服本地复制模式只适用于 zh_CN；繁中请使用默认官方模式' }
     $config = Get-Content -LiteralPath $configPath -Raw -Encoding utf8 | ConvertFrom-Json
     $cacheRoot = if ($config.cacheRoot) { [IO.Path]::GetFullPath($config.cacheRoot, $PSScriptRoot) } else { Join-Path $PSScriptRoot 'cache' }
     $twRoot = (Resolve-Path -LiteralPath $config.twRoot -ErrorAction Stop).Path.TrimEnd('\')
@@ -268,9 +241,11 @@ try {
     if (Get-Process -Name 'League of Legends' -ErrorAction SilentlyContinue) { throw '对局正在运行，请勿切换语言' }
     if (Get-Process -Name 'LeagueClient' -ErrorAction SilentlyContinue) { throw '请先关闭已打开的 League 客户端' }
     if (-not $PrepareOnly) { Assert-VanguardCooldown $twRoot }
-    $connection = Prepare-ControlledPatch
+    Prepare-OfflineCache
+    $connection = Prepare-SimplifiedPatch
 
     $launched = $false
+    $launchRequested = $false
     $deadline = (Get-Date).AddMinutes($WaitMinutes)
     $resourcesReady = $false
     $patchQueued = $true
@@ -281,13 +256,13 @@ try {
                 throw 'League 客户端或对局已打开，停止此次语言设置；请关闭客户端后重试'
             }
             if (-not $patchQueued) {
-                $connection = Prepare-ControlledPatch
+                $connection = Prepare-SimplifiedPatch
                 $patchQueued = $true
             }
             $connection = Get-RiotConnection
             $current = (Invoke-Riot $connection 'GET' $localePath).Content | ConvertFrom-Json
             if ($current -ne $Locale) {
-                $connection = Prepare-ControlledPatch
+                $connection = Prepare-SimplifiedPatch
                 $resourcesReady = $false
             }
             # v1 reports only one patchline. v2 covers game and client updates.
@@ -325,6 +300,7 @@ try {
                 Write-Status "已完成 $Locale 资源准备与官方校验；未启动游戏客户端"
                 exit 0
             }
+            $launchRequested = $true
             $null = Invoke-Riot $connection 'POST' '/product-launcher/v1/products/league_of_legends/patchlines/live' '{}' 30
             if ($resourcesReady) { $launched = $true; break }
             if (Get-Process -Name 'LeagueClient' -ErrorAction SilentlyContinue) {
@@ -338,6 +314,13 @@ try {
             $status = 0
             if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
             $timedOut = $_.Exception.Message -match 'Timeout|timed out|超时'
+            if ($launchRequested -and $resourcesReady -and ($status -eq 0 -or $timedOut)) {
+                # A local HTTP timeout does not cancel Riot's launch. Wait for
+                # that one request, then verify the client and Vanguard below.
+                Write-Status 'Riot 启动请求尚未返回，等待此次客户端启动（不重复提交）'
+                $launched = $true
+                break
+            }
             if ($status -eq 404) {
                 # Riot can restart itself for a client update. Re-read the
                 # lockfile on the next poll, but reject persistently missing APIs.
@@ -363,9 +346,13 @@ try {
     if ($current -ne $Locale) { throw "客户端已打开，但 Riot 语言变为 $current；所选语言启动未确认成功" }
     $clientProcess = Get-Process -Name LeagueClient -ErrorAction Stop | Select-Object -First 1
     Write-Status '客户端已打开，正在确认 Vanguard 登录状态'
-    Wait-VanguardLogin $twRoot $clientProcess.Id
-    Write-Status 'Vanguard 登录已确认正常'
-    Write-Status "已以 $Locale 启动台服英雄联盟"
+    $vanguardConfirmed = Wait-VanguardLogin $twRoot $clientProcess.Id -TimeoutSeconds 15 -AllowPendingLogin
+    if ($vanguardConfirmed) {
+        Write-Status 'Vanguard 登录已确认正常'
+    } else {
+        Write-Status '简中客户端已打开；账户或 Vanguard 登录尚未完成，请在客户端完成登录。不重复启动游戏。'
+    }
+    Write-Status "已以 $Locale 启动台服英雄联盟客户端"
 } catch {
     $failure = $_.Exception.Message
     Write-Status ('启动失败：' + $failure)
@@ -374,9 +361,6 @@ try {
     }
     exit 1
 } finally {
-    if ($null -ne $patchLockConnection) {
-        try { Unlock-RiotPatch } catch { Write-Status ('释放 Riot 更新锁失败：' + $_.Exception.Message) }
-    }
     if ($ownsMutex) { $mutex.ReleaseMutex() }
     if ($null -ne $mutex) { $mutex.Dispose() }
 }

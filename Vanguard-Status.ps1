@@ -41,7 +41,7 @@ function Assert-VanguardCooldown([string]$GameRoot) {
     }
 }
 
-function Wait-VanguardLogin([string]$GameRoot, [int]$ClientId, [int]$TimeoutSeconds = 60) {
+function Wait-VanguardLogin([string]$GameRoot, [int]$ClientId, [int]$TimeoutSeconds = 60, [switch]$AllowPendingLogin) {
     $logRoot = Join-Path $GameRoot 'Logs\LeagueClient Logs'
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
@@ -58,9 +58,13 @@ function Wait-VanguardLogin([string]$GameRoot, [int]$ClientId, [int]$TimeoutSeco
         if ($state.Ready) {
             Start-Sleep -Seconds 3
             $confirmed = Read-VanguardLogState $file.FullName
-            if ($confirmed.Ready -and (Get-Process -Name LeagueClient -ErrorAction SilentlyContinue | Where-Object Id -eq $ClientId)) { return }
+            if ($confirmed.Ready -and (Get-Process -Name LeagueClient -ErrorAction SilentlyContinue | Where-Object Id -eq $ClientId)) {
+                if ($AllowPendingLogin) { return $true }
+                return
+            }
         }
         Start-Sleep -Seconds 1
     } while ((Get-Date) -lt $deadline)
+    if ($AllowPendingLogin) { return $false }
     throw '一分钟内未确认 Vanguard 登录正常，请查看客户端或 Vanguard 提示；此次启动不报告成功'
 }

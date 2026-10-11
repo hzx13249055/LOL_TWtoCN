@@ -3,8 +3,7 @@ param(
     [string]$CacheRoot,
     [Parameter(Mandatory = $true)][string]$TwRoot,
     [string]$RiotClientExe = 'C:\Riot Games\Riot Client\RiotClientServices.exe',
-    [string]$ShortcutPath = (Join-Path ([Environment]::GetFolderPath('Desktop')) '台服 LOL 简体中文.lnk'),
-    [string]$TraditionalShortcutPath = (Join-Path ([Environment]::GetFolderPath('Desktop')) '台服 LOL 繁体中文.lnk')
+    [string]$ShortcutPath = (Join-Path ([Environment]::GetFolderPath('Desktop')) '台服 LOL 简体中文.lnk')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,7 +38,7 @@ $config = [ordered]@{
 }
 $config | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $configPath -Encoding utf8
 
-foreach ($entry in @(@{Path=$ShortcutPath;Locale='zh_CN'},@{Path=$TraditionalShortcutPath;Locale='zh_TW'})) {
+foreach ($entry in @(@{Path=$ShortcutPath;Locale='zh_CN'})) {
     $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($entry.Path)
     $shortcut.TargetPath = $pwsh
     $shortcut.Arguments = '-NoProfile -File "' + $launcher + '" -Locale ' + $entry.Locale + ' -ShowErrors'
@@ -51,5 +50,15 @@ foreach ($entry in @(@{Path=$ShortcutPath;Locale='zh_CN'},@{Path=$TraditionalSho
 }
 
 Write-Output "已保存本机配置：$configPath"
+# Preserve the old desktop entry locally, rather than leaving an unsupported
+# zh_TW shortcut beside the single-language launcher. Never remove its cache.
+$oldTraditional = Join-Path ([Environment]::GetFolderPath('Desktop')) '台服 LOL 繁体中文.lnk'
+if (Test-Path -LiteralPath $oldTraditional -PathType Leaf) {
+    $entryArchive = Join-Path $PSScriptRoot 'local-backups'
+    New-Item -ItemType Directory -Path $entryArchive -Force | Out-Null
+    $archiveFile = Join-Path $entryArchive ('台服 LOL 繁体中文-' + [guid]::NewGuid() + '.lnk')
+    Move-Item -LiteralPath $oldTraditional -Destination $archiveFile
+    Write-Output '旧繁中桌面入口已移入项目的本地备份目录，原资源缓存保留'
+}
 & $pwsh -NoProfile -File $launcher -CheckOnly
 if ($LASTEXITCODE -ne 0) { throw '只读检查未通过，请核对游戏版本及资源。' }

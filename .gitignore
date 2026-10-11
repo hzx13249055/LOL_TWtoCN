@@ -5,6 +5,7 @@ config.local.json
 *.lnk
 .DS_Store
 cache/
+local-backups/
 *.cache.json
 *.partial
 *.LOL_TWtoCN.original

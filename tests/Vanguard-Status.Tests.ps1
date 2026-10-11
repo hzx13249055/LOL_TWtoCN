@@ -24,6 +24,19 @@ try {
     $state = Read-VanguardLogState $newerAttempt
     if ($state.Ready -or $state.ErrorCode -ne 216) { throw 'Disconnect after login was ignored' }
     Write-Output 'PASS later attempts, recovery, post-login disconnect'
+
+    function Get-Process { param($Name) [pscustomobject]@{Id=3} }
+    function Start-Sleep { }
+    $pending = Join-Path $logs '2026-10-08T23-10-00_3_LeagueClient.log'
+    [IO.File]::WriteAllText($pending, '000001.000| ALWAYS| rcp-be-lol-vanguard| Begin connect')
+    if ((Wait-VanguardLogin $testRoot 3 -TimeoutSeconds 0 -AllowPendingLogin) -ne $false) { throw 'Pending login was reported as confirmed' }
+    [IO.File]::WriteAllText($pending, '000012.000| ALWAYS| rcp-be-lol-vanguard| Successfully logged in to Vanguard client.')
+    if ((Wait-VanguardLogin $testRoot 3 -TimeoutSeconds 0 -AllowPendingLogin) -ne $true) { throw 'Confirmed login was not reported' }
+    [IO.File]::WriteAllText($pending, "000015.000| ALWAYS| rcp-be-lol-vanguard| Disconnecting from Vanguard client: '152'")
+    $rejected = $false
+    try { $null = Wait-VanguardLogin $testRoot 3 -TimeoutSeconds 0 -AllowPendingLogin } catch { $rejected = $_.Exception.Message -match 'VAN 152' }
+    if (-not $rejected) { throw 'Pending-login allowance hid a Vanguard error' }
+    Write-Output 'PASS pending login without hiding Vanguard errors'
 } finally {
     $resolvedRoot = (Resolve-Path -LiteralPath $testRoot).Path
     if ($resolvedRoot.StartsWith([IO.Path]::GetTempPath(), [StringComparison]::OrdinalIgnoreCase)) {
