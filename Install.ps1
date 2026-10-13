@@ -20,8 +20,6 @@ foreach ($path in @(
     (Join-Path $tw 'Game\League of Legends.exe'),
     (Join-Path $tw 'Game\DATA\FINAL'),
     (Join-Path $tw 'Plugins'),
-    (Join-Path $PSScriptRoot 'Resource-Backup.ps1'),
-    (Join-Path $PSScriptRoot 'Vanguard-Status.ps1'),
     $launcher
 )) {
     if (-not (Test-Path -LiteralPath $path)) { throw "缺少所需文件或目录：$path" }
@@ -38,27 +36,15 @@ $config = [ordered]@{
 }
 $config | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $configPath -Encoding utf8
 
-foreach ($entry in @(@{Path=$ShortcutPath;Locale='zh_CN'})) {
-    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($entry.Path)
-    $shortcut.TargetPath = $pwsh
-    $shortcut.Arguments = '-NoProfile -File "' + $launcher + '" -Locale ' + $entry.Locale + ' -ShowErrors'
-    $shortcut.WorkingDirectory = $PSScriptRoot
-    $shortcut.IconLocation = (Join-Path $tw 'LeagueClient.exe') + ',0'
-    $shortcut.Description = '使用 ' + $entry.Locale + ' 资源启动台服英雄联盟'
-    $shortcut.Save()
-    Write-Output "已创建桌面入口：$($entry.Path)"
-}
+$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($ShortcutPath)
+$shortcut.TargetPath = $pwsh
+$shortcut.Arguments = '-NoProfile -File "' + $launcher + '" -ShowErrors'
+$shortcut.WorkingDirectory = $PSScriptRoot
+$shortcut.IconLocation = (Join-Path $tw 'LeagueClient.exe') + ',0'
+$shortcut.Description = '使用 zh_CN 资源启动台服英雄联盟'
+$shortcut.Save()
 
 Write-Output "已保存本机配置：$configPath"
-# Preserve the old desktop entry locally, rather than leaving an unsupported
-# zh_TW shortcut beside the single-language launcher. Never remove its cache.
-$oldTraditional = Join-Path ([Environment]::GetFolderPath('Desktop')) '台服 LOL 繁体中文.lnk'
-if (Test-Path -LiteralPath $oldTraditional -PathType Leaf) {
-    $entryArchive = Join-Path $PSScriptRoot 'local-backups'
-    New-Item -ItemType Directory -Path $entryArchive -Force | Out-Null
-    $archiveFile = Join-Path $entryArchive ('台服 LOL 繁体中文-' + [guid]::NewGuid() + '.lnk')
-    Move-Item -LiteralPath $oldTraditional -Destination $archiveFile
-    Write-Output '旧繁中桌面入口已移入项目的本地备份目录，原资源缓存保留'
-}
+Write-Output "已创建桌面入口：$ShortcutPath"
 & $pwsh -NoProfile -File $launcher -CheckOnly
 if ($LASTEXITCODE -ne 0) { throw '只读检查未通过，请核对游戏版本及资源。' }
