@@ -32,9 +32,14 @@ function Get-Process {
     if ($Name -contains 'LeagueClient' -and $script:testLaunched) { return [pscustomobject]@{ Id = 2 } }
 }
 function Start-Process { throw 'Test attempted to start a real program' }
-function Start-Sleep { }
+function Start-Sleep { if ($script:pendingLaunch) { $script:testLaunched = $true } }
 function Invoke-WebRequest {
     param($Uri, $Method, $Headers, $SkipCertificateCheck, $NoProxy, $TimeoutSec, $ContentType, $Body)
+    if ($Uri -like '*session-patch-lock*' -or $Body -match 'zh_TW') { throw 'Launcher entered a language-switching workflow' }
+    if ($Uri -like '*patch-jobs*' -and $Method -eq 'DELETE') {
+        $script:resetJobs++
+        return [pscustomobject]@{Content='{}';StatusCode=204}
+    }
     if ($Method -eq 'POST' -and $Uri -like '*patch-states/refresh*') {
         $target = Join-Path $PSScriptRoot 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client'
         if ([IO.File]::ReadAllText($target) -ne 'NEW!') { throw 'Validation requested before missing resources were restored' }
@@ -49,14 +54,28 @@ function Invoke-WebRequest {
         $ready = $state -eq 'up_to_date'
         $state = if ($ready) { 'UpToDate' } else { 'Updating' }
         if ($env:LOL_TEST_CASE -eq 'partial' -and $script:patchPoll -eq 1) { $state = 'Paused'; $ready = $true }
+        if ($env:LOL_TEST_CASE -eq 'stale' -and $script:patchPoll -eq 2) { $state = 'Updating'; $ready = $false }
+        if ($env:LOL_TEST_CASE -eq 'paused') { $state = 'Paused'; $ready = $false }
         return [pscustomobject]@{ Content = (@{ state=$state; launchable=$ready; progress=@{totalBytesDownloaded=1;totalBytesToDownload=4} } | ConvertTo-Json); StatusCode = 200 }
     }
     if ($Uri -like '*priority-patch*') {
+        if (($Body | ConvertFrom-Json).locale -ne 'zh_CN') { throw 'Patch request did not bind zh_CN' }
+        if ($script:resetJobs -lt 1) { throw 'Old default-language task was not cleared' }
         $target = Join-Path $PSScriptRoot 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client'
-        if ([IO.File]::ReadAllText($target) -ne 'OLD!') { throw 'Resources were overwritten while patching' }
+        if ($env:LOL_TEST_CASE -in @('updating','partial') -and $script:patchPoll -eq 0 -and [IO.File]::ReadAllText($target) -ne 'OLD!') { throw 'Resources were overwritten while patching' }
+        if ($env:LOL_TEST_CASE -eq 'restore' -and (Test-Path -LiteralPath $target) -and [IO.File]::ReadAllText($target) -eq 'NEW!') { $script:testValidated = $true }
+        $script:testPatchQueued = $true
         return [pscustomobject]@{ Content = '[]'; StatusCode = 201 }
     }
     if ($Method -eq 'POST') {
+        if (-not $script:testPatchQueued) { throw 'Launched using stale UpToDate status before explicit patch request' }
+        if ($env:LOL_TEST_CASE -eq 'stale' -and $script:patchPoll -lt 4) { throw 'Launched before update state stabilized' }
+        $script:launchPosts++
+        if ($env:LOL_TEST_CASE -eq 'dependency' -and $script:launchPosts -eq 1) {
+            $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::FailedDependency)
+            throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('Mock launch validation requires patch', $response)
+        }
+        if ($env:LOL_TEST_CASE -eq 'dependency' -and $script:resetJobs -lt 2) { throw '424 did not rebind language before retry' }
         if ($env:LOL_TEST_CASE -eq 'restore' -and -not $script:testValidated) { throw 'Launch bypassed validation after restoration' }
         $target = Join-Path $PSScriptRoot 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client'
         $bytes = [IO.File]::ReadAllText($target)
@@ -69,6 +88,11 @@ function Invoke-WebRequest {
         if ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'tw\Plugins\rcp-be-lol-game-data\zh_CN-assets.wad')) -ne 'NEW!') {
             throw 'Same-size client resource was not refreshed'
         }
+        if ($env:LOL_TEST_CASE -eq 'delayed') {
+            if ($script:launchPosts -gt 1) { throw 'Repeated a delayed launch request' }
+            $script:pendingLaunch = $true
+            throw [TimeoutException]::new('Mock launch timed out')
+        }
         $script:testLaunched = $true
         return [pscustomobject]@{ Content = '{}'; StatusCode = 200 }
     }
@@ -76,7 +100,7 @@ function Invoke-WebRequest {
 }
 '@
 try {
-    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore')) {
+    foreach ($case in @('mismatch', 'ready', 'updating', 'partial', 'native', 'restore', 'stale', 'dependency', 'delayed', 'prepare', 'paused', 'loginfail')) {
         $root = Join-Path $testRoot $case
         foreach ($path in @('cn\Game\DATA\FINAL','tw\Game\DATA\FINAL',
             'cn\LeagueClient\Plugins\rcp-be-lol-game-data','cn\LeagueClient\Plugins\rcp-fe-lol-typekit',
@@ -100,7 +124,7 @@ try {
             [IO.File]::WriteAllText((Join-Path $root "cn\LeagueClient\Plugins\$plugin\zh_CN-assets.wad"), 'NEW!')
             [IO.File]::WriteAllText((Join-Path $root "tw\Plugins\$plugin\zh_CN-assets.wad"), 'OLD!')
         }
-        if ($case -in @('native','restore')) {
+        if ($case -in @('native','restore','stale','dependency','delayed','prepare','paused','loginfail')) {
             Get-ChildItem -LiteralPath (Join-Path $root 'cn\Game\DATA\FINAL') -File |
                 Copy-Item -Destination (Join-Path $root 'tw\Game\DATA\FINAL') -Force
             foreach ($plugin in @('rcp-be-lol-game-data', 'rcp-fe-lol-typekit')) {
@@ -112,6 +136,11 @@ try {
             Remove-Item -LiteralPath (Join-Path $root 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client')
             Remove-Item -LiteralPath (Join-Path $root 'tw\Game\DATA\FINAL\test1.zh_CN.wad.client')
         }
+        if ($case -eq 'loginfail') {
+            $logs = Join-Path $root 'tw\Logs\LeagueClient Logs'
+            New-Item -ItemType Directory -Path $logs -Force | Out-Null
+            [IO.File]::WriteAllText((Join-Path $logs '2026-10-13T20-00-00_2_LeagueClient.log'), "000009.000| ALWAYS| rcp-be-lol-login| Login complete.`n000010.000| ERROR| rcp-be-lol-login| SUMMONER_FAILURE`n<title>Attention Required! | Cloudflare</title>")
+        }
         @{ cnRoot=(Join-Path $root 'cn'); twRoot=(Join-Path $root 'tw'); riotClientExe=(Join-Path $root 'riot.exe') } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'config.local.json') -Encoding utf8
         $fixture = $source.Insert($ast.ParamBlock.Extent.EndOffset, "`n$mocks`n")
@@ -120,14 +149,22 @@ try {
         Copy-Item -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Resource-Backup.ps1') -Destination (Join-Path $root 'Resource-Backup.ps1')
         Set-Content -LiteralPath $fixturePath -Value $fixture -Encoding utf8
         $env:LOL_TEST_CASE = $case
-        $mode = if ($case -in @('native','restore')) { 'Riot' } else { 'Local' }
-        $output = & $pwsh -NoProfile -File $fixturePath -ResourceSource $mode 2>&1
+        $mode = if ($case -in @('native','restore','stale','dependency','delayed','prepare','paused','loginfail')) { 'Riot' } else { 'Local' }
+        $extra = @()
+        if ($case -eq 'prepare') { $extra = @('-PrepareOnly') }
+        $output = & $pwsh -NoProfile -File $fixturePath -ResourceSource $mode @extra 2>&1
         $exitCode = $LASTEXITCODE
         if ($case -eq 'mismatch') {
             if ($exitCode -ne 1 -or "$output" -notmatch '实际补丁不匹配') { throw "Mismatch was not rejected: $output" }
             if ([IO.File]::ReadAllText((Join-Path $root 'tw\Game\DATA\FINAL\Global.zh_CN.wad.client')) -ne 'OLD!') {
                 throw 'Mismatch modified game resources'
             }
+        } elseif ($case -eq 'loginfail') {
+            if ($exitCode -ne 1 -or "$output" -notmatch 'Cloudflare' -or "$output" -match '已以 zh_CN 启动') { throw "Backend login failure reported success: $output" }
+        } elseif ($case -eq 'paused') {
+            if ($exitCode -ne 1 -or "$output" -notmatch '自动恢复三次') { throw "Paused task had no retry bound: $output" }
+        } elseif ($case -eq 'prepare') {
+            if ($exitCode -ne 0 -or "$output" -notmatch '未启动 League 客户端' -or "$output" -match '已以 zh_CN 启动') { throw "PrepareOnly launched the game: $output" }
         } elseif ($exitCode -ne 0 -or "$output" -notmatch '已以 zh_CN 启动') { throw "Scenario $case failed: $output" }
         Write-Output "PASS $case"
     }
